@@ -220,6 +220,14 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         return;
       }
 
+      // Presence events (join/leave): notify with user's name as title
+      if (d.type === "presence" && typeof d.user === "string" && typeof d.action === "string") {
+        const title = d.user;
+        const body = d.action === "join" ? "Has joined chat" : d.action === "leave" ? "Has left chat" : d.action;
+        notify(title, body);
+        return;
+      }
+
       // Handle delete events (main and DM)
       if (d.type === "delete" && d.id) {
         if (d.thread === "dm") {

@@ -140,9 +140,11 @@ async def ws_handler(ws: WebSocket, token: str):
                         if txt.lower() == "/ai disable":
                             ai_enabled = False
                             await manager._system("AI HAS BEEN DISABLED BY ADMIN", store=False)
+                            logger.info("AI disabled by admin %s (DM)", sub)
                         else:
                             ai_enabled = True
                             await manager._system("AI HAS BEEN ENABLED BY ADMIN", store=False)
+                            logger.info("AI enabled by admin %s (DM)", sub)
                         continue
 
                     # @ai in DM: generate AI response within this DM
@@ -201,10 +203,12 @@ async def ws_handler(ws: WebSocket, token: str):
                 if txt.lower() == "/ai disable":
                     ai_enabled = False
                     await manager._system("AI HAS BEEN DISABLED BY ADMIN", store=False)
+                    logger.info("AI disabled by admin %s", sub)
                     continue
                 if txt.lower() == "/ai enable":
                     ai_enabled = True
                     await manager._system("AI HAS BEEN ENABLED BY ADMIN", store=False)
+                    logger.info("AI enabled by admin %s", sub)
                     continue
 
             # --- Thread-aware delete (/delete <id>) in Main (admin or author) ---

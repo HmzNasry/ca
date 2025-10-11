@@ -102,6 +102,11 @@ class ConnMgr:
         tid = self.dm_id(a, b)
         self.dm_histories[tid] = []
 
+    # --- presence (join/leave) ---
+    async def _presence(self, user: str, action: str):
+        # action: "join" | "leave"; not stored in history
+        await self._broadcast({"type": "presence", "user": user, "action": action})
+
     # --- persistence ---
     def _load_bans(self):
         if os.path.exists(BAN_FILE):
@@ -143,13 +148,15 @@ class ConnMgr:
         except Exception:
             pass
         await ws.send_text(json.dumps({"type": "history", "items": self.history}))
-        await self._system(f"{user} joined the chat", store=False)
+        # Presence event (no SYSTEM message)
+        await self._presence(user, "join")
         await self._user_list()
 
     async def disconnect(self, user: str):
         if user in self.active:
             self.active.pop(user)
-            await self._system(f"{user} left the chat", store=False)
+            # Presence event (no SYSTEM message)
+            await self._presence(user, "leave")
             await self._user_list()
 
     async def _user_list(self):
