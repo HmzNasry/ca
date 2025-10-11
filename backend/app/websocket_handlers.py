@@ -17,6 +17,12 @@ manager.HISTORY = 100 if hasattr(manager, 'HISTORY') else None
 ai_enabled = True
 ai_tasks = {}  # ai_id -> {"task": asyncio.Task, "owner": str}
 
+# Safe-name helper to mirror upload.py folder naming
+_SAFE_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+
+def _safe_name(s: str) -> str:
+    return _SAFE_RE.sub("_", s or "")
+
 
 async def _cancel_all_ai():
     for ai_id, meta in list(ai_tasks.items()):
@@ -35,11 +41,11 @@ async def _cancel_ai_for_user(target: str):
             ai_tasks.pop(ai_id, None)
 
 
-async def _run_ai(ai_id: str, owner: str, prompt: str):
+async def _run_ai(ai_id: str, owner: str, prompt: str, image_url: str | None = None):
     full_text = ""
     history = list(manager.history)  # same history, so /clear wipes it
     try:
-        async for chunk in stream_ollama(prompt, image_url=None, history=history):
+        async for chunk in stream_ollama(prompt, image_url=image_url, history=history, invoker=owner):
             full_text += chunk
             try:
                 await manager._broadcast({"type": "update", "id": ai_id, "text": full_text})
@@ -47,15 +53,24 @@ async def _run_ai(ai_id: str, owner: str, prompt: str):
                 pass
     except asyncio.CancelledError:
         try:
+            # Resolve spinner with a stopped marker
+            await manager._broadcast({"type": "update", "id": ai_id, "text": "[STOPPED]"})
             await manager._system(f"AI generation by {owner} was stopped", store=False)
         except Exception:
             pass
         raise
     finally:
         try:
+            # If no output was ever produced, push a placeholder so spinner ends
+            if not full_text.strip():
+                try:
+                    await manager._broadcast({"type": "update", "id": ai_id, "text": "[NO RESPONSE]"})
+                except Exception:
+                    pass
+            # Persist final text into history
             for msg in manager.history:
                 if msg.get("id") == ai_id:
-                    msg["text"] = full_text
+                    msg["text"] = full_text if full_text.strip() else "[NO RESPONSE]"
                     break
         except Exception:
             pass
@@ -133,19 +148,31 @@ async def ws_handler(ws: WebSocket, token: str):
                     # /clear in DM: either party can clear the DM history
                     if txt == "/clear":
                         manager.clear_dm_history(sub, peer)
+                        # Also wipe the DM uploads folder (will be recreated on next upload)
+                        try:
+                            a, b = sorted([_safe_name(sub), _safe_name(peer)])
+                            dm_dir = os.path.join(UPLOAD_DIR, "dm", f"{a}__{b}")
+                            if os.path.isdir(dm_dir):
+                                shutil.rmtree(dm_dir)
+                        except Exception as e:
+                            logger.warning("Failed to remove DM upload dir: %s", e)
                         await manager._broadcast_dm_update(sub, peer, {"type": "clear", "thread": "dm", "peer": peer})
                         continue
-                    # Admin can toggle AI from within a DM as well
-                    if role == "admin" and txt.lower() in ("/ai disable", "/ai enable"):
-                        if txt.lower() == "/ai disable":
-                            ai_enabled = False
-                            await manager._system("AI HAS BEEN DISABLED BY ADMIN", store=False)
-                            logger.info("AI disabled by admin %s (DM)", sub)
-                        else:
-                            ai_enabled = True
-                            await manager._system("AI HAS BEEN ENABLED BY ADMIN", store=False)
-                            logger.info("AI enabled by admin %s (DM)", sub)
-                        continue
+                    # Admin can toggle AI from within a DM as well (case-insensitive, extra spaces ok)
+                    if role == "admin":
+                        m_ai_toggle = re.match(r"^\s*/ai\s+(enable|disable)\b", txt, re.I)
+                        if m_ai_toggle:
+                            action = m_ai_toggle.group(1).lower()
+                            if action == "disable":
+                                ai_enabled = False
+                                # Do not cancel running tasks; just block new requests
+                                await manager._system("AI HAS BEEN DISABLED BY ADMIN", store=False)
+                                logger.info("AI disabled by admin %s (DM)", sub)
+                            else:
+                                ai_enabled = True
+                                await manager._system("AI HAS BEEN ENABLED BY ADMIN", store=False)
+                                logger.info("AI enabled by admin %s (DM)", sub)
+                            continue
 
                     # @ai in DM: generate AI response within this DM
                     if re.match(r"^@ai\b", txt, re.I):
@@ -156,29 +183,60 @@ async def ws_handler(ws: WebSocket, token: str):
                         if not ai_enabled and role != "admin":
                             await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI IS DISABLED BY ADMIN"}))
                             continue
+                        # Validate attachments: allow at most one image via `image`; reject generic `url` or multiples
+                        if data.get("url"):
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI ONLY ACCEPTS A SINGLE IMAGE"}))
+                            continue
+                        img_url = data.get("image") if isinstance(data.get("image"), str) else None
+                        # Extra guard: only accept static images (png/jpg/jpeg/webp); reject gif and non-images
+                        if img_url:
+                            mime_hint = str(data.get("image_mime") or "").lower()
+                            allowed_exts = (".png", ".jpg", ".jpeg", ".webp")
+                            is_ok = False
+                            if mime_hint:
+                                is_ok = (mime_hint.startswith("image/") and mime_hint != "image/gif")
+                            else:
+                                lower = img_url.lower()
+                                is_ok = lower.endswith(allowed_exts)
+                            if not is_ok:
+                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI ONLY SUPPORTS STATIC IMAGES (PNG/JPG/JPEG/WEBP)"}))
+                                continue
+                        # proceed
                         ai_id = f"AI-{int(datetime.utcnow().timestamp()*1000)}"
                         ts0 = datetime.utcnow().isoformat() + "Z"
-                        model = TEXT_MODEL
+                        model = "llava:7b" if img_url else TEXT_MODEL
                         # Echo user's prompt into the DM before AI bubble
                         echo_id = f"{sub}-{int(datetime.utcnow().timestamp()*1000)}"
                         echo = {"id": echo_id, "sender": sub, "timestamp": ts0, "type": "message", "text": txt, "thread": "dm", "peer": peer}
                         await manager._broadcast_dm(sub, peer, echo)
+                        # If image supplied, also show it inline in the DM timeline
+                        if img_url:
+                            mid = f"{sub}-img-{int(datetime.utcnow().timestamp()*1000)}"
+                            mime = str(data.get("image_mime") or "image/jpeg")
+                            await manager._broadcast_dm(sub, peer, {"id": mid, "sender": sub, "timestamp": ts0, "type": "media", "url": img_url, "mime": mime, "thread": "dm", "peer": peer})
                         bubble = {"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "", "model": model, "thread": "dm", "peer": peer}
                         await manager._broadcast_dm(sub, peer, bubble)
                         async def _run_dm_ai():
                             full_text = ""
                             history = manager.get_dm_history(sub, peer)
                             try:
-                                async for chunk in stream_ollama(prompt, image_url=None, history=history):
+                                async for chunk in stream_ollama(prompt, image_url=img_url, history=history, invoker=sub):
                                     full_text += chunk
                                     try:
                                         await manager._broadcast_dm_update(sub, peer, {"type": "update", "id": ai_id, "text": full_text, "thread": "dm", "peer": peer})
                                     except Exception:
                                         pass
                             except asyncio.CancelledError:
+                                # Resolve spinner with a stopped marker
+                                try:
+                                    await manager._broadcast_dm_update(sub, peer, {"type": "update", "id": ai_id, "text": "[STOPPED]", "thread": "dm", "peer": peer})
+                                except Exception:
+                                    pass
                                 raise
                             finally:
-                                manager.update_dm_text(sub, peer, ai_id, full_text)
+                                # Ensure final text replaces spinner even if empty
+                                final_text = full_text if full_text.strip() else "[NO RESPONSE]"
+                                manager.update_dm_text(sub, peer, ai_id, final_text)
                         task = asyncio.create_task(_run_dm_ai())
                         ai_tasks[ai_id] = {"task": task, "owner": sub}
                         continue
@@ -198,17 +256,20 @@ async def ws_handler(ws: WebSocket, token: str):
                         await manager._broadcast_dm(sub, peer, msg)
                 continue
 
-            # --- Admin AI toggles ---
+            # --- Admin AI toggles (Main): case-insensitive, allow extra spaces ---
             if role == "admin":
-                if txt.lower() == "/ai disable":
-                    ai_enabled = False
-                    await manager._system("AI HAS BEEN DISABLED BY ADMIN", store=False)
-                    logger.info("AI disabled by admin %s", sub)
-                    continue
-                if txt.lower() == "/ai enable":
-                    ai_enabled = True
-                    await manager._system("AI HAS BEEN ENABLED BY ADMIN", store=False)
-                    logger.info("AI enabled by admin %s", sub)
+                m_ai_toggle = re.match(r"^\s*/ai\s+(enable|disable)\b", txt, re.I)
+                if m_ai_toggle:
+                    action = m_ai_toggle.group(1).lower()
+                    if action == "disable":
+                        ai_enabled = False
+                        # Do not cancel running tasks; just block new requests
+                        await manager._system("AI HAS BEEN DISABLED BY ADMIN", store=False)
+                        logger.info("AI disabled by admin %s", sub)
+                    else:
+                        ai_enabled = True
+                        await manager._system("AI HAS BEEN ENABLED BY ADMIN", store=False)
+                        logger.info("AI enabled by admin %s", sub)
                     continue
 
             # --- Thread-aware delete (/delete <id>) in Main (admin or author) ---
@@ -352,63 +413,60 @@ async def ws_handler(ws: WebSocket, token: str):
                 if not ai_enabled and role != "admin":
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI IS DISABLED BY ADMIN"}))
                     continue
+                # Validate attachments: allow a single `image` only; reject generic file/url attachments
                 if data.get("url"):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI DOESN'T ACCEPT ATTACHMENTS"}))
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI ONLY ACCEPTS A SINGLE IMAGE"}))
                     continue
-
+                img_url = data.get("image") if isinstance(data.get("image"), str) else None
+                # Extra guard: only accept static images (png/jpg/jpeg/webp); reject gif and non-images
+                if img_url:
+                    mime_hint = str(data.get("image_mime") or "").lower()
+                    allowed_exts = (".png", ".jpg", ".jpeg", ".webp")
+                    is_ok = False
+                    if mime_hint:
+                        is_ok = (mime_hint.startswith("image/") and mime_hint != "image/gif")
+                    else:
+                        lower = img_url.lower()
+                        is_ok = lower.endswith(allowed_exts)
+                    if not is_ok:
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI ONLY SUPPORTS STATIC IMAGES (PNG/JPG/WEBP)"}))
+                        continue
+                model = "llava:7b" if img_url else TEXT_MODEL
+                # Define ids and timestamp before broadcasting
                 ai_id = f"AI-{int(datetime.utcnow().timestamp()*1000)}"
                 ts0 = datetime.utcnow().isoformat() + "Z"
-                model = TEXT_MODEL
-                # If this is a DM context (thread: 'dm' + peer), send AI bubble into that DM and stream only to both peers
-                if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
-                    peer = data.get("peer").strip()
-                    if peer and peer != sub:
-                        # Echo user's prompt (with @ai visible) into the DM timeline first
-                        echo_id = f"{sub}-{int(datetime.utcnow().timestamp()*1000)}"
-                        echo = {"id": echo_id, "sender": sub, "timestamp": ts0, "type": "message", "text": txt, "thread": "dm", "peer": peer}
-                        await manager._broadcast_dm(sub, peer, echo)
-
-                        bubble = {"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "", "model": model, "thread": "dm", "peer": peer}
-                        await manager._broadcast_dm(sub, peer, bubble)
-                        async def _run_dm_ai():
-                            full_text = ""
-                            # use DM history as context
-                            history = manager.get_dm_history(sub, peer)
-                            try:
-                                async for chunk in stream_ollama(prompt, image_url=None, history=history):
-                                    full_text += chunk
-                                    try:
-                                        await manager._broadcast_dm_update(sub, peer, {"type": "update", "id": ai_id, "text": full_text, "thread": "dm", "peer": peer})
-                                    except Exception:
-                                        pass
-                            except asyncio.CancelledError:
-                                raise
-                            finally:
-                                # finalize in stored DM history
-                                manager.update_dm_text(sub, peer, ai_id, full_text)
-                        task = asyncio.create_task(_run_dm_ai())
-                        ai_tasks[ai_id] = {"task": task, "owner": sub}
-                        continue
-                # Else, seed AI bubble in Main
                 # Echo user's prompt (with @ai visible) into Main timeline first
                 echo_id = f"{sub}-{int(datetime.utcnow().timestamp()*1000)}"
                 await manager._broadcast({"id": echo_id, "sender": sub, "timestamp": ts0, "type": "message", "text": txt, "thread": "main"})
+                # If an image was supplied, also show it in the timeline so the context is visible
+                if img_url:
+                    mid = f"{sub}-img-{int(datetime.utcnow().timestamp()*1000)}"
+                    mime = str(data.get("image_mime") or "image/jpeg")
+                    await manager._broadcast({"id": mid, "sender": sub, "timestamp": ts0, "type": "media", "url": img_url, "mime": mime, "thread": "main"})
                 await manager._broadcast({"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "", "model": model})
-                task = asyncio.create_task(_run_ai(ai_id, sub, prompt))
+                task = asyncio.create_task(_run_ai(ai_id, sub, prompt, image_url=img_url))
                 ai_tasks[ai_id] = {"task": task, "owner": sub}
                 continue
 
-            # --- Normal messages / media (Main chat) ---
-            mid = f"{sub}-{int(datetime.utcnow().timestamp() * 1000)}"
-            ts = now.isoformat() + "Z"
-            if "url" in data:
-                msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "media", "url": data.get("url"), "mime": data.get("mime"), "text": data.get("text", ""), "thread": "main"}
-            else:
-                msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": txt, "thread": "main"}
-            await manager._broadcast(msg)
+            # Normal Main send
+            if data.get("text"):
+                mid = f"{sub}-{int(now.timestamp()*1000)}"
+                ts = now.isoformat() + "Z"
+                msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": str(data.get("text"))[:4000]}
+                await manager._broadcast(msg)
+            elif data.get("url"):
+                url = str(data.get("url"))
+                mime = str(data.get("mime") or "")
+                mid = f"{sub}-{int(now.timestamp()*1000)}"
+                ts = now.isoformat() + "Z"
+                msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "media", "url": url, "mime": mime}
+                await manager._broadcast(msg)
 
     except WebSocketDisconnect:
         pass
     finally:
-        await manager.disconnect(sub)
+        try:
+            await manager.disconnect(ws)
+        except Exception:
+            pass
 

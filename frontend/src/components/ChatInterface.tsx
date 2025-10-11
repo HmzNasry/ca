@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import TextareaAutosize from "react-textarea-autosize";
-import { Paperclip, Send, Loader2, X, Smile, Trash2 } from "lucide-react";
-import EmojiPicker, { Theme } from "emoji-picker-react";
+import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown } from "lucide-react";
 import EmojiConvertor from "emoji-js";
 import AlertModal from "@/components/AlertModal";
 
 import * as api from "@/services/api";
+import Sidebar from "./Sidebar";
+import EmojiPanel from "./EmojiPanel";
+import AttachmentPreview from "./AttachmentPreview";
 
 export function ChatInterface({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [me, setMe] = useState("");
@@ -58,6 +60,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const fallbackFlashRefs = useRef<Record<string, number>>({});
   // Chat scroll container (use as IntersectionObserver root)
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Auto-scroll management
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const isAtBottomRef = useRef(true);
+  const forceScrollRef = useRef(false);
 
   // Active mention targets: online users + 'ai'
   const activeMentions = useMemo(() => {
@@ -177,6 +184,23 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     };
   }, [flashMap, chatScrollRef.current]);
 
+  // Track scroll position to only auto-scroll when at bottom
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const at = el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
+      if (isAtBottomRef.current !== at) {
+        isAtBottomRef.current = at;
+        setIsAtBottom(at);
+      }
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    // initialize
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
   // Disconnect observer and clear timers on unmount
   useEffect(() => () => {
     Object.values(timeoutRefs.current).forEach(t => window.clearTimeout(t));
@@ -211,20 +235,41 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       if (d.type === "alert") {
         const text = (d.text || "").toUpperCase().replace(/\.$/, "");
         const code = (d.code || "").toUpperCase();
+        // Post a SYSTEM line in the timeline as well
+        const sysLine = {
+          id: `alert-${Date.now()}-${Math.random()}`,
+          type: "system",
+          sender: "SYSTEM",
+          text,
+          timestamp: new Date().toISOString(),
+        } as any;
+        setMessages(prev => [...prev, sysLine]);
         // Also show OS notification for critical alerts
-        if (code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT") {
-          notify("Alert", text);
+        if (code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT" || code === "UNBANNED") {
+          notify("SYSTEM", text);
+        } else {
+          notify("SYSTEM", text);
         }
         const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT";
         showAlert(text, shouldLogout ? () => onLogout() : undefined);
         return;
       }
 
-      // Presence events (join/leave): notify with user's name as title
+      // Presence events (join/leave): notify and append as SYSTEM message in timeline
       if (d.type === "presence" && typeof d.user === "string" && typeof d.action === "string") {
-        const title = d.user;
-        const body = d.action === "join" ? "Has joined chat" : d.action === "leave" ? "Has left chat" : d.action;
-        notify(title, body);
+        const user = (d.user || "").toUpperCase();
+        const actionRaw = (d.action || "").toUpperCase();
+        const action = actionRaw === "JOIN" ? "HAS JOINED CHAT" : actionRaw === "LEAVE" ? "HAS LEFT CHAT" : actionRaw;
+        notify(user, action);
+        // also append a system line to the chat timeline
+        const sysMsg = {
+          id: `presence-${Date.now()}-${Math.random()}`,
+          type: "system",
+          sender: "SYSTEM",
+          text: `${user} ${action}`,
+          timestamp: new Date().toISOString(),
+        } as any;
+        setMessages(prev => [...prev, sysMsg]);
         return;
       }
 
@@ -244,11 +289,23 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       // Handle clear events (main and DM)
       if (d.type === "clear") {
+        const sys = {
+          id: `clear-${Date.now()}-${Math.random()}`,
+          type: "system",
+          sender: "SYSTEM",
+          text: (d.thread === "dm") ? "DM CLEARED" : "ADMIN CLEARED THE CHAT",
+          timestamp: new Date().toISOString(),
+        } as any;
         if (d.thread === "dm") {
-          if (activeDmRef.current === d.peer) setMessages([]);
+          if (activeDmRef.current === d.peer) {
+            setMessages([sys]);
+          }
         } else {
-          if (activeDmRef.current === null) setMessages([]);
+          if (activeDmRef.current === null) {
+            setMessages([sys]);
+          }
         }
+        notify("SYSTEM", sys.text);
         return;
       }
 
@@ -257,12 +314,14 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         seen.current.clear();
         d.items.forEach((x: any) => x?.id && seen.current.add(x.id));
         historyIdsRef.current = new Set((d.items || []).map((x: any) => x && x.id).filter(Boolean));
+        forceScrollRef.current = true; // scroll to latest after loading history
         return setMessages(d.items);
       }
       if (d.type === "dm_history" && Array.isArray(d.items)) {
         seen.current.clear();
         d.items.forEach((x: any) => x?.id && seen.current.add(x.id));
         historyIdsRef.current = new Set((d.items || []).map((x: any) => x && x.id).filter(Boolean));
+        forceScrollRef.current = true; // scroll to latest after loading dm history
         return setMessages(d.items);
       }
 
@@ -391,13 +450,14 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       // System events notifications and handle clear wording
       if (d.type === "system") {
-        const txt = d.text || "";
-        // If admin cleared the chat, also clear main timeline before appending
+        const txt = (d.text || "").toUpperCase();
+        // If admin cleared the chat, also clear main timeline and show only the system line
         if (activeDmRef.current === null && /CLEARED THE CHAT/i.test(txt)) {
-          setMessages([]);
+          notify("SYSTEM", txt);
+          return setMessages([{ ...d, sender: "SYSTEM", text: txt }]);
         }
-        notify("System", txt);
-        return setMessages(p => [...p, d]);
+        notify("SYSTEM", txt);
+        return setMessages(p => [...p, { ...d, text: txt }]);
       }
 
       if (d.id && seen.current.has(d.id)) return;
@@ -425,8 +485,13 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     }
   }, [activeDm]);
 
+  // Auto-scroll on new messages only if at bottom or when explicitly forced (e.g., after loading history)
   useEffect(() => {
-    if (messages.length) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!messages) return;
+    if (forceScrollRef.current || isAtBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      forceScrollRef.current = false;
+    }
   }, [messages]);
 
   // Small mount animation for each message (fast + smooth) — run only once per element
@@ -490,10 +555,17 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       return;
     }
 
-    // Block attachments when using @ai
+    // Validate @ai attachments: allow only a single image
     if (/^@ai\b/i.test(txt) && files.length > 0) {
-      showAlert("@ai does not accept attachments for now");
-      return; // keep state so user can remove files
+      const imgs = files.filter(f => f.type && f.type.startsWith("image"));
+      if (imgs.length !== 1) {
+        showAlert("attach a single image for @ai image mode");
+        return; // keep state so user can adjust
+      }
+      if (imgs[0].type === "image/gif") {
+        showAlert("@ai only supports static images (png/jpg/webp)");
+        return;
+      }
     }
 
     // @ai mention triggers AI (text-only)
@@ -506,14 +578,23 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       try {
         const threadPayload = activeDm ? { thread: "dm", peer: activeDm } : {};
-        // Send only the @ai command; backend will echo the user's @ai message visibly
-        ws.current?.send(JSON.stringify({ text: `@ai ${promptOnly}`, ...threadPayload }));
+        // If an image is attached, upload it and include as `image` for llava
+        const imgFile = files.find(f => f.type && f.type.startsWith("image"));
+        if (imgFile) {
+          const up = await api.uploadFile(imgFile, activeDm ? { thread: "dm", peer: activeDm, user: me } : { thread: "main", user: me });
+          if (!up?.url) throw new Error("upload failed");
+          ws.current?.send(JSON.stringify({ text: `@ai ${promptOnly}`, image: up.url, image_mime: up.mime, ...threadPayload }));
+        } else {
+          // Send only the @ai command; backend will echo visibly
+          ws.current?.send(JSON.stringify({ text: `@ai ${promptOnly}`, ...threadPayload }));
+        }
         setInput("");
         setFiles([]);
         setShowPicker(false);
       } catch {
         showAlert("failed to send ai request");
       } finally {
+        if (fileRef.current) fileRef.current.value = "";
         txtRef.current?.focus();
       }
       return;
@@ -650,85 +731,17 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         onClose={() => setAlertOpen(false)}
       />
       {/* SIDEBAR */}
-      <aside
-        onClick={() => !sidebar && setSidebar(true)}
-        className={`transition-[width] duration-300 ease-out ${
-          sidebar ? "w-64 opacity-100" : "w-8 opacity-80"
-        } flex flex-col bg-[#0a0a0a] border-r border-white/10 rounded-tr-3xl rounded-br-3xl cursor-pointer relative overflow-visible z-20`}
-      >
-        <button
-          onClick={e => {
-            e.stopPropagation();
-            setSidebar(!sidebar);
-          }}
-          className={`absolute right-0 top-1/2 translate-x-1/2 -translate-y-1/2 bg-[#0a0a0a] border border-white/10 text-[#e7dec3] text-[34px] font-bold rounded-full px-[7px] pb-[3px] hover:scale-110 transition-transform z-50`}
-        >
-          {sidebar ? "‹" : "›"}
-        </button>
-
-        <div className={`flex flex-col h-full overflow-hidden ${sidebar ? "transition-[opacity,transform] duration-200 ease-out opacity-100 translate-x-0" : "hidden"}`}>
-          <h2 className="text-lg font-semibold text-center mt-3 mb-2">
-            Online Users
-          </h2>
-          <hr className="border-white/10 mb-3 mx-3" />
-          <ul className="space-y-3 px-4 overflow-y-auto no-scrollbar py-2">
-            {users.map(u => {
-              const isAdminUser =
-                u.trim().toLowerCase() === "haz" ||
-                u.trim().toLowerCase() === "haznas";
-              const isMeUser = u === me;
-              const selected = activeDm === u;
-              const dmCount = unreadDm[u] || 0;
-              return (
-                <li key={u} className="">
-                  <button
-                    disabled={isMeUser}
-                    onClick={() => !isMeUser && setActiveDm(u)}
-                    className={`w-full text-left px-3 py-2 rounded-xl border transition flex items-center justify-between select-none ${
-                      selected ? "bg-[#f5f3ef] text-black border-white/20" : "border-transparent hover:bg-white/10 hover:border-white/10 text-white"
-                    } ${isMeUser ? "cursor-not-allowed" : "cursor-pointer"}`}
-                  >
-                    <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}>
-                      {u}
-                       {isAdminUser && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
-                     </span>
-                    {dmCount > 0 && (
-                      <span className="ml-2 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-500/80 text-white text-xs font-bold">
-                        {dmCount}
-                      </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          <hr className="border-white/10 mt-6 mb-4 mx-3" />
-          <div className="px-4 pb-3">
-            <button
-              onClick={() => setActiveDm(null)}
-              className={`w-full text-left px-3 py-2 rounded-xl border transition flex items-center justify-between select-none ${
-                activeDm === null ? "bg-[#f5f3ef] text-black border-white/20" : "border-transparent hover:bg-white/10 hover:border-white/10 text-white"
-              }`}
-            >
-              <span className={activeDm === null ? "text-black" : "text-white"}>Main Chat</span>
-              {unreadMain > 0 && (
-                <span className="ml-2 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-500/80 text-white text-xs font-bold">
-                  {unreadMain}
-                </span>
-              )}
-            </button>
-          </div>
-
-          <div className="mt-auto pt-2 pb-4 border-t border-white/10 mx-2">
-            <Button
-              onClick={onLogout}
-              className="w-full bg-red-600/90 hover:bg-red-700 text-white rounded-xl shadow-[0_0_10px_rgba(255,0,0,0.3)] transition-all"
-            >
-              Logout
-            </Button>
-          </div>
-        </div>
-      </aside>
+      <Sidebar
+        users={users}
+        me={me}
+        activeDm={activeDm}
+        unreadDm={unreadDm}
+        unreadMain={unreadMain}
+        sidebar={sidebar}
+        setSidebar={setSidebar}
+        onSelectDm={(u) => setActiveDm(u)}
+        onLogout={onLogout}
+      />
 
       {/* CHAT */}
       <main className="flex-1 flex flex-col bg-black relative">
@@ -757,7 +770,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 if (m.sender === "SYSTEM") {
                   return (
                     <div key={m.id} className="flex justify-center mb-2">
-                      <div className="text-xs text-[#cfc7aa]/90 italic">{m.text}</div>
+                      <div className="text-xs text-[#cfc7aa]/90 italic">{(m.text || "").toUpperCase()}</div>
                     </div>
                   );
                 }
@@ -766,7 +779,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const canDelete = mine || isAdmin;
                 const mime = m.mime || "";
                 const isImage = mime.startswith ? mime.startswith("image") : mime.startsWith("image");
-                const isVideo = mime.startswith ? mime.startswith("video") : mime.startsWith("video");
+                const isVideo = mime.startswith ? mime.startsWith("video") : mime.startsWith("video");
                 const isAudio = mime.startswith ? mime.startsWith("audio") : mime.startsWith("audio");
                 const firstUrl = m.type === "message" ? extractFirstUrl(m.text) : null;
                 const onlyLinkOnly = !!firstUrl && m.text.trim() === firstUrl;
@@ -794,7 +807,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {first && (
                         <div className="flex items-baseline gap-2 mb-0.5">
                           <span className={`text-sm font-semibold ${m.sender === "AI" ? "text-blue-400" : (mine ? "text-[#e7dec3]" : "text-[#cfc7aa]")}`}>
-                            {m.sender}
+                            {m.sender === "AI" && m.model ? `AI (${m.model})` : m.sender}
                           </span>
                           <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}</span>
                         </div>
@@ -833,18 +846,38 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                           ) : (
                             <video src={firstUrl!} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
                           )}
+                          {canDelete && (
+                            <button
+                              onClick={() => deleteMsg(m.id)}
+                              title="Delete"
+                              className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto"
+                            >
+                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                            </button>
+                          )}
                         </div>
                       )}
 
                       {/* Media message (image/video/audio) */}
-                      {(isImage || isVideo || isAudio) && (
+                      {m.type === "media" && (
                         <div className="relative">
                           {isImage ? (
                             <img src={full(m.url)} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
                           ) : isVideo ? (
                             <video src={full(m.url)} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
-                          ) : (
+                          ) : isAudio ? (
                             <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
+                          ) : (
+                            <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
+                          )}
+                          {canDelete && (
+                            <button
+                              onClick={() => deleteMsg(m.id)}
+                              title="Delete"
+                              className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto"
+                            >
+                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                            </button>
                           )}
                         </div>
                       )}
@@ -873,7 +906,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 if (m.sender === "SYSTEM") {
                   return (
                     <div key={m.id} className="flex justify-center mb-2">
-                      <div className="text-xs text-[#cfc7aa]/90 italic">{m.text}</div>
+                      <div className="text-xs text-[#cfc7aa]/90 italic">{(m.text || "").toUpperCase()}</div>
                     </div>
                   );
                 }
@@ -910,7 +943,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {first && (
                         <div className="flex items-baseline gap-2 mb-0.5">
                           <span className={`text-sm font-semibold ${m.sender === "AI" ? "text-blue-400" : (mine ? "text-[#e7dec3]" : "text-[#cfc7aa]")}`}>
-                            {m.sender}
+                            {m.sender === "AI" && m.model ? `AI (${m.model})` : m.sender}
                           </span>
                           <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}</span>
                         </div>
@@ -949,18 +982,38 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                           ) : (
                             <video src={firstUrl!} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
                           )}
+                          {canDelete && (
+                            <button
+                              onClick={() => deleteMsg(m.id)}
+                              title="Delete"
+                              className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto"
+                            >
+                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                            </button>
+                          )}
                         </div>
                       )}
 
                       {/* Media message (image/video/audio) */}
-                      {(isImage || isVideo || isAudio) && (
+                      {m.type === "media" && (
                         <div className="relative">
                           {isImage ? (
                             <img src={full(m.url)} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
                           ) : isVideo ? (
                             <video src={full(m.url)} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
-                          ) : (
+                          ) : isAudio ? (
                             <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
+                          ) : (
+                            <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
+                          )}
+                          {canDelete && (
+                            <button
+                              onClick={() => deleteMsg(m.id)}
+                              title="Delete"
+                              className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto"
+                            >
+                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                            </button>
                           )}
                         </div>
                       )}
@@ -986,6 +1039,21 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           )}
         </div>
 
+        {/* Scroll-to-bottom FAB shown when scrolled up */}
+        {!isAtBottom && (
+          <button
+            onClick={() => {
+              forceScrollRef.current = true;
+              bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+            }}
+            title="Scroll to bottom"
+            className="absolute left-1/2 -translate-x-1/2 transform bottom-28 md:bottom-32 bg-[#2b2b2b]/90 hover:bg-[#3a3a3a] text-[#f7f3e8] border border-white/15 rounded-full shadow-lg px-4 py-2 transition z-20"
+          >
+            <span className="sr-only">Scroll to bottom</span>
+            <ChevronDown className="h-5 w-5" strokeWidth={3} />
+          </button>
+        )}
+
         {/* INPUT */}
         <div className="relative p-4 pb-6">
           {/* Decorative glass/fade backdrop behind composer with softer opacity and fade-up animation */}
@@ -994,31 +1062,14 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           </div>
 
           {files.length > 0 && (
-            <div className="flex flex-wrap gap-2 mb-2">
-              {files.map((f, i) => (
-                <div key={i} className="relative">
-                  <img src={URL.createObjectURL(f)} className="h-16 w-16 rounded-lg object-cover" />
-                  <button onClick={() => setFiles(files.filter((_, x) => x !== i))} className="absolute -top-1 -right-1 bg-red-600 rounded-full text-white text-[10px] leading-none px-[3px]">
-                    <X size={10} />
-                  </button>
-                </div>
-              ))}
-            </div>
+            <AttachmentPreview files={files} onRemove={(idx: number) => setFiles(files.filter((_, x) => x !== idx))} />
           )}
 
           {/* Emoji picker */}
-          {showPicker && (
-            <div className="absolute bottom-24 right-6 z-10">
-              <EmojiPicker
-                theme={Theme.DARK}
-                onEmojiClick={(e) => {
-                  setInput(prev => prev + (e.emoji || ""));
-                  txtRef.current?.focus();
-                }}
-                lazyLoadEmojis
-              />
-            </div>
-          )}
+          <EmojiPanel
+            open={showPicker}
+            onPick={(emoji: string) => { setInput(prev => prev + emoji); txtRef.current?.focus(); }}
+          />
 
           <form
             className="relative z-10 flex items-center space-x-2 rounded-2xl bg-black/30 border border-white/15 backdrop-blur-xl shadow-[0_0_8px_rgba(255,255,255,0.05)] px-4 py-3"
@@ -1033,13 +1084,31 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
               multiple
               ref={fileRef}
               onChange={e => {
-                // Prevent attaching files when composing an @ai message
-                if (/^@ai\b/i.test(input.trim())) {
-                  showAlert("@ai does not accept attachments for now");
-                  if (fileRef.current) fileRef.current.value = "";
+                const selected = Array.from(e.target.files || []);
+                const isAi = /^@ai\b/i.test(input.trim());
+                if (isAi) {
+                  // allow exactly one image for @ai image mode
+                  const images = selected.filter(f => f.type && f.type.startsWith("image"));
+                  if (images.length === 0) {
+                    showAlert("attach a single image for @ai image mode");
+                    if (fileRef.current) fileRef.current.value = "";
+                    return;
+                  }
+                  if (images.length > 1) {
+                    showAlert("@ai supports only one image at a time");
+                    if (fileRef.current) fileRef.current.value = "";
+                    return;
+                  }
+                  if (images[0].type === "image/gif") {
+                    showAlert("@ai only supports static images (png/jpg/webp)");
+                    if (fileRef.current) fileRef.current.value = "";
+                    return;
+                  }
+                  setFiles([images[0]]);
+                  fileRef.current!.value = "";
                   return;
                 }
-                setFiles([...files, ...Array.from(e.target.files || [])]);
+                setFiles([...files, ...selected]);
                 fileRef.current!.value = "";
               }}
             />
@@ -1084,11 +1153,32 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                     }
                   }
                   if (pasted.length) {
-                    if (/^@ai\b/i.test(input.trim())) {
-                      setAlertText("@ai does not accept attachments for now");
-                      setAlertButton("OK");
-                      alertActionRef.current = null;
-                      setAlertOpen(true);
+                    const isAi = /^@ai\b/i.test(input.trim());
+                    if (isAi) {
+                      const images = pasted.filter(f => f.type && f.type.startsWith("image"));
+                      if (images.length === 0) {
+                        setAlertText("attach a single image for @ai image mode");
+                        setAlertButton("OK");
+                        alertActionRef.current = null;
+                        setAlertOpen(true);
+                        return;
+                      }
+                      if (images.length > 1) {
+                        setAlertText("@ai supports only one image at a time");
+                        setAlertButton("OK");
+                        alertActionRef.current = null;
+                        setAlertOpen(true);
+                        return;
+                      }
+                      if (images[0].type === "image/gif") {
+                        setAlertText("@ai only supports static images (png/jpg/webp)");
+                        setAlertButton("OK");
+                        alertActionRef.current = null;
+                        setAlertOpen(true);
+                        return;
+                      }
+                      e.preventDefault();
+                      setFiles([images[0]]);
                       return;
                     }
                     e.preventDefault();

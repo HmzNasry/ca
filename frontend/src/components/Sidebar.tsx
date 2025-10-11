@@ -1,0 +1,97 @@
+import React from "react";
+import { Button } from "@/components/ui/button";
+
+export interface SidebarProps {
+  users: string[];
+  me: string;
+  activeDm: string | null;
+  unreadDm: Record<string, number>;
+  unreadMain: number;
+  sidebar: boolean;
+  setSidebar: (v: boolean) => void;
+  onSelectDm: (user: string | null) => void;
+  onLogout: () => void;
+}
+
+export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sidebar, setSidebar, onSelectDm, onLogout }: SidebarProps) {
+  return (
+    <aside
+      onClick={() => !sidebar && setSidebar(true)}
+      className={`transition-[width] duration-300 ease-out ${
+        sidebar ? "w-64 opacity-100" : "w-8 opacity-80"
+      } flex flex-col bg-[#0a0a0a] border-r border-white/10 rounded-tr-3xl rounded-br-3xl cursor-pointer relative overflow-visible z-20`}
+    >
+      <button
+        onClick={e => {
+          e.stopPropagation();
+          setSidebar(!sidebar);
+        }}
+        className={`absolute right-0 top-1/2 translate-x-1/2 -translate-y-1/2 bg-[#0a0a0a] border border-white/10 text-[#e7dec3] text-[34px] font-bold rounded-full px-[7px] pb-[3px] hover:scale-110 transition-transform z-50`}
+      >
+        {sidebar ? "‹" : "›"}
+      </button>
+
+      <div className={`flex flex-col h-full overflow-hidden ${sidebar ? "transition-[opacity,transform] duration-200 ease-out opacity-100 translate-x-0" : "hidden"}`}>
+        <h2 className="text-lg font-semibold text-center mt-3 mb-2">
+          Online Users
+        </h2>
+        <hr className="border-white/10 mb-3 mx-3" />
+        <ul className="space-y-3 px-4 overflow-y-auto no-scrollbar py-2">
+          {users.map(u => {
+            const isAdminUser = u.trim().toLowerCase() === "haz" || u.trim().toLowerCase() === "haznas";
+            const isMeUser = u === me;
+            const selected = activeDm === u;
+            const dmCount = unreadDm[u] || 0;
+            return (
+              <li key={u} className="">
+                <button
+                  disabled={isMeUser}
+                  onClick={() => !isMeUser && onSelectDm(u)}
+                  className={`relative w-full px-3 py-2 rounded-xl border transition flex items-center justify-center text-center select-none ${
+                    selected ? "bg-[#f5f3ef] text-black border-white/20" : "border-transparent hover:bg-white/10 hover:border-white/10 text-white"
+                  } ${isMeUser ? "cursor-not-allowed" : "cursor-pointer"}`}
+                >
+                  <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}
+                  >
+                    {u}
+                    {isAdminUser && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                  </span>
+                  {dmCount > 0 && (
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center min-w-6 h-6 px-2 rounded-full bg-red-500/80 text-white text-xs font-bold">
+                      {dmCount}
+                    </span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+        <hr className="border-white/10 mt-6 mb-4 mx-3" />
+        <div className="px-4 pb-3">
+          <button
+            onClick={() => onSelectDm(null)}
+            className={`relative w-full px-3 py-2 rounded-xl border transition flex items-center justify-center text-center select-none ${
+              activeDm === null ? "bg-[#f5f3ef] text-black border-white/20" : "border-transparent hover:bg-white/10 hover:border-white/10 text-white"
+            }`}
+          >
+            <span className={activeDm === null ? "text-black" : "text-white"}>Main Chat</span>
+            {unreadMain > 0 && (
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center min-w-6 h-6 px-2 rounded-full bg-red-500/80 text-white text-xs font-bold">
+                {unreadMain}
+              </span>
+            )}
+          </button>
+        </div>
+
+        <div className="mt-auto pt-2 pb-4 border-t border-white/10 mx-2">
+          <Button
+            onClick={onLogout}
+            className="w-full bg-red-600/90 hover:bg-red-700 text-white rounded-xl shadow-[0_0_10px_rgba(255,0,0,0.3)] transition-all"
+          >
+            Logout
+          </Button>
+        </div>
+      </div>
+    </aside>
+  );
+}
