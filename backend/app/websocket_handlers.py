@@ -10,6 +10,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# New: import auth module so we can mutate SERVER_PASSWORD at runtime
+from . import auth as auth_mod
+
 manager = ConnMgr()
 manager.HISTORY = 100 if hasattr(manager, 'HISTORY') else None
 
@@ -23,6 +26,48 @@ _SAFE_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
 def _safe_name(s: str) -> str:
     return _SAFE_RE.sub("_", s or "")
 
+# Resolve a username to the exact online casing; fallback to the original if not found
+def _canonical_user(name: str) -> str:
+    try:
+        n = (name or "").strip()
+        if not n:
+            return name
+        low = n.lower()
+        for u in list(manager.active.keys()):
+            if u.lower() == low:
+                return u
+        return name
+    except Exception:
+        return name
+
+# Check if a user is an effective admin (built-in or promoted)
+def _is_effective_admin(user: str) -> bool:
+    try:
+        return (manager.roles.get(user) == "admin") or (user in manager.promoted_admins)
+    except Exception:
+        return False
+
+# Map color flags to canonical color strings for the UI
+COLOR_FLAGS = {
+    '-r': 'red', '-red': 'red',
+    '-g': 'green', '-green': 'green',
+    '-b': 'blue', '-blue': 'blue',
+    '-p': 'pink', '-pink': 'pink',
+    '-y': 'yellow', '-yellow': 'yellow',
+    '-w': 'white', '-white': 'white',
+    '-c': 'cyan', '-cyan': 'cyan',
+    # Additional colors
+    '-purple': 'purple',
+    '-violet': 'violet',
+    '-indigo': 'indigo',
+    '-teal': 'teal',
+    '-lime': 'lime',
+    '-amber': 'amber',
+    '-emerald': 'emerald',
+    '-fuchsia': 'fuchsia',
+    '-sky': 'sky',
+    '-gray': 'gray',
+}
 
 async def _cancel_all_ai():
     for ai_id, meta in list(ai_tasks.items()):
@@ -97,7 +142,7 @@ async def ws_handler(ws: WebSocket, token: str):
         return
 
     await ws.accept()
-    await manager.connect(ws, sub)
+    await manager.connect(ws, sub, role)
 
     try:
         while True:
@@ -115,7 +160,9 @@ async def ws_handler(ws: WebSocket, token: str):
                             "type": "typing", "user": sub, "typing": data["typing"], "thread": "dm"
                         })
                 else:
-                    # Main thread typing
+                    # Main thread typing: suppress if muted
+                    if manager.is_muted(sub):
+                        continue
                     await manager._broadcast({"type": "typing", "user": sub, "typing": data["typing"], "thread": "main"})
                 continue
 
@@ -159,33 +206,35 @@ async def ws_handler(ws: WebSocket, token: str):
                         await manager._broadcast_dm_update(sub, peer, {"type": "clear", "thread": "dm", "peer": peer})
                         continue
                     # Admin can toggle AI from within a DM as well (case-insensitive, extra spaces ok)
-                    if role == "admin":
+                    if role == "admin" or sub in manager.promoted_admins:
                         m_ai_toggle = re.match(r"^\s*/ai\s+(enable|disable)\b", txt, re.I)
                         if m_ai_toggle:
                             action = m_ai_toggle.group(1).lower()
                             if action == "disable":
                                 ai_enabled = False
                                 # Do not cancel running tasks; just block new requests
-                                await manager._system("AI HAS BEEN DISABLED BY ADMIN", store=False)
+                                await manager._system("AI has been disabled by admin", store=False)
                                 logger.info("AI disabled by admin %s (DM)", sub)
                             else:
                                 ai_enabled = True
-                                await manager._system("AI HAS BEEN ENABLED BY ADMIN", store=False)
+                                await manager._system("AI has been enabled by admin", store=False)
                                 logger.info("AI enabled by admin %s (DM)", sub)
                             continue
 
-                    # @ai in DM: generate AI response within this DM
-                    if re.match(r"^@ai\b", txt, re.I):
-                        prompt = re.sub(r"^@ai\s*", "", txt, flags=re.I).strip()
+                    # @ai in DM: only if at start (do not block when muted)
+                    m_ai_dm = re.match(r"^\s*@ai\b(.*)$", txt, re.I)
+                    if m_ai_dm:
+                        # removed mute block for DM
+                        prompt = (m_ai_dm.group(1) or "").strip()
                         if not prompt:
-                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "USAGE: @AI <PROMPT>"}))
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "usage: @ai <prompt>"}))
                             continue
-                        if not ai_enabled and role != "admin":
-                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI IS DISABLED BY ADMIN"}))
+                        if not ai_enabled and not (role == "admin" or sub in manager.promoted_admins):
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai is disabled by admin"}))
                             continue
                         # Validate attachments: allow at most one image via `image`; reject generic `url` or multiples
                         if data.get("url"):
-                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI ONLY ACCEPTS A SINGLE IMAGE"}))
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai only accepts a single image"}))
                             continue
                         img_url = data.get("image") if isinstance(data.get("image"), str) else None
                         # Extra guard: only accept static images (png/jpg/jpeg/webp); reject gif and non-images
@@ -199,13 +248,13 @@ async def ws_handler(ws: WebSocket, token: str):
                                 lower = img_url.lower()
                                 is_ok = lower.endswith(allowed_exts)
                             if not is_ok:
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI ONLY SUPPORTS STATIC IMAGES (PNG/JPG/JPEG/WEBP)"}))
+                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai only supports static images (png/jpg/webp)"}))
                                 continue
                         # proceed
                         ai_id = f"AI-{int(datetime.utcnow().timestamp()*1000)}"
                         ts0 = datetime.utcnow().isoformat() + "Z"
                         model = "llava:7b" if img_url else TEXT_MODEL
-                        # Echo user's prompt into the DM before AI bubble
+                        # Echo user's raw text into the DM before AI bubble
                         echo_id = f"{sub}-{int(datetime.utcnow().timestamp()*1000)}"
                         echo = {"id": echo_id, "sender": sub, "timestamp": ts0, "type": "message", "text": txt, "thread": "dm", "peer": peer}
                         await manager._broadcast_dm(sub, peer, echo)
@@ -241,7 +290,7 @@ async def ws_handler(ws: WebSocket, token: str):
                         ai_tasks[ai_id] = {"task": task, "owner": sub}
                         continue
 
-                    # Normal DM send (text/media)
+                    # Normal DM send (text/media) — do not block for mute
                     ts = now.isoformat() + "Z"
                     if data.get("text"):
                         dm_text = str(data.get("text"))[:4000]
@@ -257,23 +306,22 @@ async def ws_handler(ws: WebSocket, token: str):
                 continue
 
             # --- Admin AI toggles (Main): case-insensitive, allow extra spaces ---
-            if role == "admin":
+            if role == "admin" or sub in manager.promoted_admins:
                 m_ai_toggle = re.match(r"^\s*/ai\s+(enable|disable)\b", txt, re.I)
                 if m_ai_toggle:
                     action = m_ai_toggle.group(1).lower()
                     if action == "disable":
                         ai_enabled = False
-                        # Do not cancel running tasks; just block new requests
-                        await manager._system("AI HAS BEEN DISABLED BY ADMIN", store=False)
+                        await manager._system("AI has been disabled by admin", store=False)
                         logger.info("AI disabled by admin %s", sub)
                     else:
                         ai_enabled = True
-                        await manager._system("AI HAS BEEN ENABLED BY ADMIN", store=False)
+                        await manager._system("AI has been enabled by admin", store=False)
                         logger.info("AI enabled by admin %s", sub)
                     continue
 
             # --- Thread-aware delete (/delete <id>) in Main (admin or author) ---
-            if txt.startswith("/delete "):
+            if txt.lower().startswith("/delete "):
                 m = re.match(r"/delete\s+(\S+)", txt)
                 if m:
                     msg_id = m.group(1)
@@ -291,97 +339,253 @@ async def ws_handler(ws: WebSocket, token: str):
                 continue
 
             # --- DM-only clear handled above; Global clear (main): admin only ---
-            if role == "admin":
-                if txt == "/clear":
+            if txt.strip().lower() == "/clear":
+                if role == "admin" or sub in manager.promoted_admins:
+                    # Cancel all running AI tasks
                     await _cancel_all_ai()
-                    manager.history.clear()
+                    # Clear main history
                     try:
-                        # Only clear main uploads, keep per-DM folders intact
+                        manager.history.clear()
+                    except Exception:
+                        manager.history = []
+                    # Remove main uploads folder
+                    try:
                         main_dir = os.path.join(UPLOAD_DIR, "main")
                         if os.path.isdir(main_dir):
-                            for f in os.listdir(main_dir):
-                                fp = os.path.join(main_dir, f)
-                                if os.path.isfile(fp):
-                                    os.remove(fp)
-                                elif os.path.isdir(fp):
-                                    shutil.rmtree(fp)
-                        # Also clear any legacy top-level files left directly under uploads/
-                        for f in os.listdir(UPLOAD_DIR):
-                            fp = os.path.join(UPLOAD_DIR, f)
-                            if os.path.isfile(fp):
-                                os.remove(fp)
-                    except Exception as e:
-                        print(f"Error clearing uploads: {e}")
-                    await manager._system("ADMIN CLEARED THE CHAT")
-                    await manager._broadcast({"type": "clear"})
-                    continue
-
-                if txt.startswith("/kick"):
-                    m = re.match(r"/kick\s+(\w+)", txt)
-                    if m:
-                        target = m.group(1)
-                        if target in manager.active:
-                            await manager._system(f"{target} WAS KICKED BY ADMIN", store=False)
-                            await manager.active[target].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "YOU WERE KICKED FROM CHAT"}))
-                            await manager.active[target].close()
-                            manager.active.pop(target, None)
-                            await manager._user_list()
-                    continue
-
-                if txt.startswith("/ban"):
-                    m = re.match(r"/ban\s+(\w+)", txt)
-                    if m:
-                        target = m.group(1)
-                        if target == "HAZ":
-                            await manager._system("CANNOT BAN ADMIN", store=False)
-                            continue
-                        if target in manager.active:
-                            ws_target = manager.active[target]
-                            ip_target = ws_target.client.host
-                            manager.ban_user(target, ip_target)
-                            await manager._system(f"{target} WAS BANNED BY ADMIN", store=False)
-                            try:
-                                await ws_target.send_text(json.dumps({"type": "alert", "code": "BANNED", "text": "YOU WERE BANNED FROM CHAT"}))
-                            except:
-                                pass
-                            await ws_target.close()
-                            manager.active.pop(target, None)
-                            await manager._user_list()
-                        else:
-                            manager.ban_user(target)
-                            await manager._system(f"{target} (OFFLINE) WAS BANNED BY ADMIN", store=False)
-                    continue
-
-                if txt.startswith("/unban"):
-                    m = re.match(r"/unban\s+(\w+)", txt)
-                    if m:
-                        target = m.group(1)
-                        existed = target in manager.banned_users
-                        if existed:
-                            manager.unban_user(target)
-                            await manager._system(f"{target} WAS UNBANNED BY ADMIN", store=False)
-                        else:
-                            await ws.send_text(json.dumps({"type": "alert", "code": "NOT_BANNED", "text": f"{target} IS NOT BANNED"}))
-                    continue
-
-            if txt == "/clear":
-                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "ONLY ADMIN CAN CLEAR CHAT"}))
+                            shutil.rmtree(main_dir)
+                    except Exception:
+                        pass
+                    # Broadcast clear event and an informational system line
+                    try:
+                        await manager._broadcast({"type": "clear", "thread": "main"})
+                    except Exception:
+                        pass
+                    await manager._system("Admin cleared the chat", store=False)
+                else:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "ONLY ADMIN CAN CLEAR CHAT"}))
                 continue
 
-            if not data.get("url") and not txt:
-                continue
+            # --- Admin commands (Main) ---
+            if role == "admin" or sub in manager.promoted_admins:
+                # New: change server password in main (admin only)
+                m_pass = re.match(r'^\s*/pass\s+"([^"]+)"\s*$', txt, re.I)
+                if m_pass:
+                    new_pass = m_pass.group(1)
+                    auth_mod.SERVER_PASSWORD = new_pass
+                    await manager._system("Server message changed", store=False)
+                    logger.info("Server password changed by admin %s", sub)
+                    continue
 
-            # --- DM quick send via command: /dm <user> <text> ---
+                # /rjtag — admin opts out of being tagged (remove own user tag but not ADMIN status)
+                if re.match(r'^\s*/rjtag\s*$', txt, re.I):
+                    manager.tag_rejects.add(sub)
+                    # Remove any existing user tag for this admin (ADMIN indicator is separate and untouched)
+                    if sub in manager.tags:
+                        manager.tags.pop(sub, None)
+                        await manager._user_list()
+                        await manager._system(f"{sub} removed their tag", store=False)
+                    else:
+                        await manager._system(f"{sub} rejected being tagged", store=False)
+                    continue
+
+                # /mute "user" <minutes>
+                m_mute = re.match(r'^\s*/mute\s+"([^"]+)"\s+(\d+)\s*$', txt, re.I)
+                if m_mute:
+                    target, mins = m_mute.group(1), int(m_mute.group(2))
+                    target = _canonical_user(target)
+                    # prevent admins from muting other admins (private alert)
+                    if _is_effective_admin(target):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "cannot moderate admins"}))
+                        continue
+                    manager.mute_user(target, mins)
+                    await manager._system(f"{target} was muted for {mins} minutes by admin", store=False)
+                    continue
+
+                # /unmute "user"
+                m_unmute = re.match(r'^\s*/unmute\s+"([^"]+)"\s*$', txt, re.I)
+                if m_unmute:
+                    target = _canonical_user(m_unmute.group(1))
+                    manager.unmute_user(target)
+                    await manager._system(f"{target} was unmuted by admin", store=False)
+                    continue
+
+                # /tag "username" "tag" [color]
+                # color is optional flag among: -r/-red, -g/-green, -b/-blue, -p/-pink, -y/-yellow, -w/-white, -c/-cyan
+                m_tag = re.match(r'^\s*/tag\s+"([^"]+)"\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
+                if m_tag:
+                    target_raw, tag_text, color_flag = m_tag.group(1), m_tag.group(2), (m_tag.group(3) or '').lower()
+                    target = _canonical_user(target_raw)
+                    # block tagging admins who opted out
+                    if _is_effective_admin(target) and target in manager.tag_rejects:
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": f"@{target} has blocked being tagged"}))
+                        continue
+                    color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
+                    manager.tags[target] = {"text": tag_text, "color": color}
+                    await manager._user_list()
+                    await manager._system(f"{target} was tagged {tag_text}", store=False)
+                    continue
+
+                # /ctag "username" — clear tag
+                m_ctag = re.match(r'^\s*/ctag\s+"([^"]+)"\s*$', txt, re.I)
+                if m_ctag:
+                    target_raw = m_ctag.group(1)
+                    target = _canonical_user(target_raw)
+                    if target in manager.tags:
+                        manager.tags.pop(target, None)
+                        await manager._system(f"{target} tag cleared", store=False)
+                    await manager._user_list()
+                    continue
+
+                # /mkadmin "username" superpass
+                m_mk = re.match(r'^\s*/mkadmin\s+"([^"]+)"\s+(\S+)\s*$', txt, re.I)
+                if m_mk:
+                    target_raw, sup = m_mk.group(1), m_mk.group(2)
+                    target = _canonical_user(target_raw)
+                    # Cannot promote tagged WEIRDO
+                    if (manager.tags.get(target, {}).get("text", "").upper() == "WEIRDO"):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Cannot make weirdos admins!"}))
+                        continue
+                    if sup != getattr(auth_mod, 'SUPER_PASS', ''):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "invalid superpass"}))
+                        continue
+                    manager.promoted_admins.add(target)
+                    await manager._system(f"{target} was granted admin", store=False)
+                    await manager._user_list()
+                    continue
+
+                # /rmadmin "username" superpass
+                m_rm = re.match(r'^\s*/rmadmin\s+"([^"]+)"\s+(\S+)\s*$', txt, re.I)
+                if m_rm:
+                    target_raw, sup = m_rm.group(1), m_rm.group(2)
+                    target = _canonical_user(target_raw)
+                    if sup != getattr(auth_mod, 'SUPER_PASS', ''):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "invalid superpass"}))
+                        continue
+                    # If not admin (built-in or promoted), show error
+                    is_builtin = manager.roles.get(target) == "admin"
+                    is_promoted = target in manager.promoted_admins
+                    if not (is_builtin or is_promoted):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "user is not an admin"}))
+                        continue
+                    # Demote runtime only (built-in demote is temporary via demoted_admins)
+                    manager.promoted_admins.discard(target)
+                    manager.demoted_admins.add(target)
+                    await manager._system(f"{target} was demoted from admin", store=False)
+                    await manager._user_list()
+                    continue
+
+                # /kick "username"
+                m_kick = re.match(r'^\s*/kick\s+"([^"]+)"\s*$', txt, re.I)
+                if m_kick:
+                    target = _canonical_user(m_kick.group(1))
+                    # prevent admins from kicking other admins
+                    if _is_effective_admin(target):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "cannot moderate admins"}))
+                        continue
+                    if target in manager.active:
+                        await manager._system(f"{target} WAS KICKED BY ADMIN", store=False)
+                        await manager.active[target].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "YOU WERE KICKED FROM CHAT"}))
+                        await manager.active[target].close()
+                        manager.active.pop(target, None)
+                        await manager._user_list()
+                    else:
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": f"{target} is not online"}))
+                    continue
+
+                # /kickA — kick everyone except admins
+                if re.match(r'^\s*/kickA\s*$', txt, re.I):
+                    to_kick = [u for u in list(manager.active.keys()) if not ((manager.roles.get(u) == "admin") or (u in manager.promoted_admins))]
+                    for u in to_kick:
+                        try:
+                            await manager.active[u].send_text(json.dumps({
+                                "type": "alert",
+                                "code": "KICKED",
+                                "text": "You were kicked from chat"
+                            }))
+                        except:
+                            pass
+                    # Do not close sockets or modify active list; clients will logout
+                    continue
+
+                # /ban "username"
+                m_ban = re.match(r'^\s*/ban\s+"([^"]+)"\s*$', txt, re.I)
+                if m_ban:
+                    target = _canonical_user(m_ban.group(1))
+                    # do not allow banning admins (real or promoted) — private modal, not system broadcast
+                    if _is_effective_admin(target):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "cannot moderate admins"}))
+                        continue
+                    if target in manager.active:
+                        ws_target = manager.active[target]
+                        ip_target = ws_target.client.host
+                        manager.ban_user(target, ip_target)
+                        await manager._system(f"{target} was banned by admin", store=False)
+                        try:
+                            await ws_target.send_text(json.dumps({"type": "alert", "code": "BANNED", "text": "You were banned from chat"}))
+                        except:
+                            pass
+                        await ws_target.close()
+                        manager.active.pop(target, None)
+                        await manager._user_list()
+                    else:
+                        manager.ban_user(target)
+                        await manager._system(f"{target} (offline) was banned by admin", store=False)
+                    continue
+
+                # /unban "username"
+                m_unban = re.match(r'^\s*/unban\s+"([^"]+)"\s*$', txt, re.I)
+                if m_unban:
+                    target = _canonical_user(m_unban.group(1))
+                    existed = target in manager.banned_users
+                    if existed:
+                        manager.unban_user(target)
+                        await manager._system(f"{target} WAS UNBANNED BY ADMIN", store=False)
+                    else:
+                        await ws.send_text(json.dumps({"type": "alert", "code": "NOT_BANNED", "text": f"{target} IS NOT BANNED"}))
+                    continue
+
+                # Usage helpers (including updated quoted syntax)
+                if re.match(r'^\s*/mkadmin\b', txt, re.I) and not re.match(r'^\s*/mkadmin\s+"[^"]+"\s+\S+\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /mkadmin "username" superpass'}))
+                    continue
+                if re.match(r'^\s*/rmadmin\b', txt, re.I) and not re.match(r'^\s*/rmadmin\s+"[^"]+"\s+\S+\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /rmadmin "username" superpass'}))
+                    continue
+                if re.match(r'^\s*/tag\b', txt, re.I) and not re.match(r'^\s*/tag\s+"[^"]+"\s+"[^"]+"(?:\s+\-\w+)?\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /tag "username" "tag" [-r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray]'}))
+                    continue
+                if re.match(r'^\s*/ctag\b', txt, re.I) and not re.match(r'^\s*/ctag\s+"[^"]+"\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /ctag "username"'}))
+                    continue
+                if re.match(r'^\s*/kick\b', txt, re.I) and not re.match(r'^\s*/kick\s+"[^"]+"\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /kick "username"'}))
+                    continue
+                if re.match(r'^\s*/ban\b', txt, re.I) and not re.match(r'^\s*/ban\s+"[^"]+"\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /ban "username"'}))
+                    continue
+                if re.match(r'^\s*/unban\b', txt, re.I) and not re.match(r'^\s*/unban\s+"[^"]+"\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /unban "username"'}))
+                    continue
+                if re.match(r'^\s*/mute\b', txt, re.I) and not re.match(r'^\s*/mute\s+"[^"]+"\s+\d+\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /mute "username" minutes'}))
+                    continue
+                if re.match(r'^\s*/unmute\b', txt, re.I) and not re.match(r'^\s*/unmute\s+"[^"]+"\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /unmute "username"'}))
+                    continue
+
             if txt.startswith("/dm "):
-                m = re.match(r"/dm\s+(\w+)\s+(.+)$", txt)
+                # updated to require quoted usernames and show usage when invalid
+                m = re.match(r"/dm\s+\"([^\"]+)\"\s+(.+)$", txt, re.I)
                 if m:
-                    peer = m.group(1)
+                    peer = _canonical_user(m.group(1))
                     dm_text = m.group(2).strip()
                     if peer and peer != sub and dm_text:
                         mid = f"{sub}-{int(datetime.utcnow().timestamp() * 1000)}"
                         ts = now.isoformat() + "Z"
                         msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": dm_text, "thread": "dm", "peer": peer}
                         await manager._broadcast_dm(sub, peer, msg)
+                else:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /dm "username" message'}))
                 continue
 
             # --- AI stop (@ai stop or /ai stop) ---
@@ -404,21 +608,28 @@ async def ws_handler(ws: WebSocket, token: str):
                     await _cancel_ai_for_user(sub)
                 continue
 
-            # --- AI command ---
-            if re.match(r"^@ai\b", txt, re.I):
-                prompt = re.sub(r"^@ai\s*", "", txt, flags=re.I).strip()
+            # --- AI command in Main: revert to only at start ---
+            m_ai_start = re.match(r"^\s*@ai\b(.*)$", txt, re.I)
+            if m_ai_start:
+                if manager.is_muted(sub):
+                    await ws.send_text(json.dumps({
+                        "type": "alert",
+                        "code": "MUTED",
+                        "text": "you are muted",
+                        "seconds": manager.remaining_mute_seconds(sub)
+                    }))
+                    continue
+                prompt = (m_ai_start.group(1) or "").trim() if hasattr(str, 'trim') else (m_ai_start.group(1) or "").strip()
                 if not prompt:
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "USAGE: @AI <PROMPT>"}))
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "usage: @ai <prompt>"}))
                     continue
-                if not ai_enabled and role != "admin":
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI IS DISABLED BY ADMIN"}))
+                if not ai_enabled and not (role == "admin" or sub in manager.promoted_admins):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai is disabled by admin"}))
                     continue
-                # Validate attachments: allow a single `image` only; reject generic file/url attachments
                 if data.get("url"):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI ONLY ACCEPTS A SINGLE IMAGE"}))
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai only accepts a single image"}))
                     continue
                 img_url = data.get("image") if isinstance(data.get("image"), str) else None
-                # Extra guard: only accept static images (png/jpg/jpeg/webp); reject gif and non-images
                 if img_url:
                     mime_hint = str(data.get("image_mime") or "").lower()
                     allowed_exts = (".png", ".jpg", ".jpeg", ".webp")
@@ -429,20 +640,17 @@ async def ws_handler(ws: WebSocket, token: str):
                         lower = img_url.lower()
                         is_ok = lower.endswith(allowed_exts)
                     if not is_ok:
-                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@AI ONLY SUPPORTS STATIC IMAGES (PNG/JPG/WEBP)"}))
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai only supports static images (png/jpg/webp)"}))
                         continue
                 model = "llava:7b" if img_url else TEXT_MODEL
-                # Define ids and timestamp before broadcasting
                 ai_id = f"AI-{int(datetime.utcnow().timestamp()*1000)}"
                 ts0 = datetime.utcnow().isoformat() + "Z"
-                # Echo user's prompt (with @ai visible) into Main timeline first
                 echo_id = f"{sub}-{int(datetime.utcnow().timestamp()*1000)}"
                 await manager._broadcast({"id": echo_id, "sender": sub, "timestamp": ts0, "type": "message", "text": txt, "thread": "main"})
-                # If an image was supplied, also show it in the timeline so the context is visible
                 if img_url:
                     mid = f"{sub}-img-{int(datetime.utcnow().timestamp()*1000)}"
                     mime = str(data.get("image_mime") or "image/jpeg")
-                    await manager._broadcast({"id": mid, "sender": sub, "timestamp": ts0, "type": "media", "url": img_url, "mime": mime, "thread": "main"})
+                    await manager._broadcast({"id": mid, "sender": sub, "timestamp": ts0, "type": "media", "url": img_url, "mime": mime})
                 await manager._broadcast({"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "", "model": model})
                 task = asyncio.create_task(_run_ai(ai_id, sub, prompt, image_url=img_url))
                 ai_tasks[ai_id] = {"task": task, "owner": sub}
@@ -450,11 +658,28 @@ async def ws_handler(ws: WebSocket, token: str):
 
             # Normal Main send
             if data.get("text"):
+                # If muted, block sends silently and show alert
+                if manager.is_muted(sub):
+                    await ws.send_text(json.dumps({
+                        "type": "alert",
+                        "code": "MUTED",
+                        "text": "you are muted",
+                        "seconds": manager.remaining_mute_seconds(sub)
+                    }))
+                    continue
                 mid = f"{sub}-{int(now.timestamp()*1000)}"
                 ts = now.isoformat() + "Z"
                 msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": str(data.get("text"))[:4000]}
                 await manager._broadcast(msg)
             elif data.get("url"):
+                if manager.is_muted(sub):
+                    await ws.send_text(json.dumps({
+                        "type": "alert",
+                        "code": "MUTED",
+                        "text": "you are muted",
+                        "seconds": manager.remaining_mute_seconds(sub)
+                    }))
+                    continue
                 url = str(data.get("url"))
                 mime = str(data.get("mime") or "")
                 mid = f"{sub}-{int(now.timestamp()*1000)}"
@@ -462,11 +687,15 @@ async def ws_handler(ws: WebSocket, token: str):
                 msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "media", "url": url, "mime": mime}
                 await manager._broadcast(msg)
 
+            # '/clear' handled earlier; keep this branch as a no-op to avoid duplicate alerts
+            if txt.strip().lower() == "/clear":
+                continue
+
     except WebSocketDisconnect:
         pass
     finally:
         try:
-            await manager.disconnect(ws)
+            await manager.disconnect(sub)
         except Exception:
             pass
 

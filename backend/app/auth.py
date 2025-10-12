@@ -6,6 +6,9 @@ SECRET_KEY = "41bbd87b957b7261457a5cb438974dd9f9131cc1f9a1099afb314cbd843ee642"
 ALGORITHM = "HS256"
 ADMIN_USER = "HAZ"
 ADMIN_PASS = "71060481"
+# SUPER_PASS is used for /mkadmin and /rmadmin admin commands
+# Defaulting to ADMIN_PASS so the logged-in admin can use the same secret
+SUPER_PASS = ADMIN_PASS
 SERVER_PASSWORD = "securepass32x1"
 
 class Login(BaseModel):

@@ -1,4 +1,3 @@
-import React from "react";
 import { Button } from "@/components/ui/button";
 
 export interface SidebarProps {
@@ -11,9 +10,34 @@ export interface SidebarProps {
   setSidebar: (v: boolean) => void;
   onSelectDm: (user: string | null) => void;
   onLogout: () => void;
+  admins?: string[];
+  tags?: Record<string, { text: string; color?: string } | string>;
 }
 
-export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sidebar, setSidebar, onSelectDm, onLogout }: SidebarProps) {
+function colorClass(c?: string) {
+  switch ((c || "orange").toLowerCase()) {
+    case "red": return "text-red-500";
+    case "green": return "text-green-500";
+    case "blue": return "text-blue-400";
+    case "pink": return "text-pink-400";
+    case "yellow": return "text-yellow-400";
+    case "white": return "text-white";
+    case "cyan": return "text-cyan-400";
+    case "purple": return "text-purple-400";
+    case "violet": return "text-violet-400";
+    case "indigo": return "text-indigo-400";
+    case "teal": return "text-teal-400";
+    case "lime": return "text-lime-400";
+    case "amber": return "text-amber-400";
+    case "emerald": return "text-emerald-400";
+    case "fuchsia": return "text-fuchsia-400";
+    case "sky": return "text-sky-400";
+    case "gray": return "text-gray-400";
+    default: return "text-orange-400";
+  }
+}
+
+export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sidebar, setSidebar, onSelectDm, onLogout, admins = [], tags = {} }: SidebarProps) {
   return (
     <aside
       onClick={() => !sidebar && setSidebar(true)}
@@ -38,10 +62,12 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
         <hr className="border-white/10 mb-3 mx-3" />
         <ul className="space-y-3 px-4 overflow-y-auto no-scrollbar py-2">
           {users.map(u => {
-            const isAdminUser = u.trim().toLowerCase() === "haz" || u.trim().toLowerCase() === "haznas";
+            const isAdminUser = Array.isArray(admins) && admins.includes(u);
             const isMeUser = u === me;
             const selected = activeDm === u;
             const dmCount = unreadDm[u] || 0;
+            const tagVal = (tags as any)[u];
+            const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
             return (
               <li key={u} className="">
                 <button
@@ -51,10 +77,10 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
                     selected ? "bg-[#f5f3ef] text-black border-white/20" : "border-transparent hover:bg-white/10 hover:border-white/10 text-white"
                   } ${isMeUser ? "cursor-not-allowed" : "cursor-pointer"}`}
                 >
-                  <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}
-                  >
+                  <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}>
                     {u}
                     {isAdminUser && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                    {tagObj && <span className={`${colorClass(tagObj.color)} font-semibold`}> ({tagObj.text})</span>}
                   </span>
                   {dmCount > 0 && (
                     <span className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center min-w-6 h-6 px-2 rounded-full bg-red-500/80 text-white text-xs font-bold">

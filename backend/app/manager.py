@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import json, os
 from typing import Dict, List
 from fastapi import WebSocket
@@ -12,6 +12,16 @@ class ConnMgr:
         self.user_ips: Dict[str, str] = {}  # map username -> last seen IP (in-memory)
         self.history: List[dict] = []  # main chat history
         self.dm_histories: Dict[str, List[dict]] = {}  # key: dm_id(userA,userB) -> history list
+        # moderation/admin & roles
+        self.roles: Dict[str, str] = {}  # username -> role (e.g., 'admin' or 'user')
+        self.promoted_admins: set[str] = set()  # runtime-granted admins
+        self.demoted_admins: set[str] = set()   # runtime-demoted built-in admins (session only)
+        # tagging
+        self.tags: Dict[str, dict] = {}  # username -> { text: str, color: str }
+        self.tag_rejects: set[str] = set()
+        # mutes
+        self.mutes: Dict[str, datetime] = {}
+        # bans
         self.banned_users: set[str] = set()
         self.banned_ips: set[str] = set()
         self._load_bans()
@@ -136,8 +146,10 @@ class ConnMgr:
             print("Failed to save ban list:", e)
 
     # --- connection logic ---
-    async def connect(self, ws: WebSocket, user: str):
+    async def connect(self, ws: WebSocket, user: str, role: str = "user"):
         self.active[user] = ws
+        # set/refresh role for this session
+        self.roles[user] = role or "user"
         # record latest IP for the user (in-memory); persist only for banned users
         try:
             ip = ws.client.host
@@ -157,10 +169,25 @@ class ConnMgr:
             self.active.pop(user)
             # Presence event (no SYSTEM message)
             await self._presence(user, "leave")
+            # Clean up session-scoped demotions/promotions/tags for this user if desired
+            # Note: we do not remove tags by default; keep until session end or explicit clear
             await self._user_list()
 
+    def _effective_admins(self) -> List[str]:
+        admins: List[str] = []
+        for u in self.active.keys():
+            base_admin = (self.roles.get(u) == "admin") and (u not in self.demoted_admins)
+            promoted = u in self.promoted_admins
+            if base_admin or promoted:
+                admins.append(u)
+        return admins
+
     async def _user_list(self):
-        await self._broadcast({"type": "user_list", "users": list(self.active.keys())})
+        payload = {"type": "user_list", "users": list(self.active.keys())}
+        # include admins and tags to support richer clients (ignored by older clients)
+        payload["admins"] = self._effective_admins()
+        payload["tags"] = self.tags
+        await self._broadcast(payload)
 
     async def _system(self, text: str, store: bool = True):
         msg = {
@@ -207,4 +234,33 @@ class ConnMgr:
         # also remove stored mapping entry so it doesn't linger
         self.user_ips.pop(username, None)
         self._save_bans()
+
+    # ---- mute helpers ----
+    def mute_user(self, username: str, minutes: int):
+        try:
+            mins = max(int(minutes), 0)
+        except Exception:
+            mins = 0
+        until = datetime.utcnow() + timedelta(minutes=mins)
+        self.mutes[username] = until
+
+    def unmute_user(self, username: str):
+        self.mutes.pop(username, None)
+
+    def is_muted(self, username: str) -> bool:
+        until = self.mutes.get(username)
+        if not until:
+            return False
+        if datetime.utcnow() >= until:
+            # expired
+            self.mutes.pop(username, None)
+            return False
+        return True
+
+    def remaining_mute_seconds(self, username: str) -> int:
+        until = self.mutes.get(username)
+        if not until:
+            return 0
+        delta = (until - datetime.utcnow()).total_seconds()
+        return max(int(delta), 0)
 

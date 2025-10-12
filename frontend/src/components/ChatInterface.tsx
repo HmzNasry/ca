@@ -14,6 +14,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const [me, setMe] = useState("");
   const [role, setRole] = useState("");
   const [users, setUsers] = useState<string[]>([]);
+  const [admins, setAdmins] = useState<string[]>([]);
+  const [tagsMap, setTagsMap] = useState<Record<string, any>>({});
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -32,6 +34,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const [alertText, setAlertText] = useState("");
   const [alertButton, setAlertButton] = useState<string | undefined>("OK");
   const alertActionRef = useRef<(() => void) | null>(null);
+  const muteIntervalRef = useRef<number | null>(null);
 
   const ws = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -78,7 +81,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   emoji.replace_mode = "unified";
   emoji.allow_native = true;
 
-  const isAdmin = role === "admin";
+  const isAdmin = admins.includes(me) || role === "admin";
   const full = (url: string) => (url.startsWith("/") ? location.origin + url : url);
 
   // Ask for notification permission on mount
@@ -106,9 +109,36 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const mentionsMe = useCallback((text: string) => {
     if (!me || !text) return false;
-    const re = new RegExp(`(^|\\s|[^\\w])@${escapeRegex(me)}(?![\\w])`, "i");
-    return re.test(text);
+    const meEsc = escapeRegex(me);
+    // Match @me (word-bounded) or @"me" (quoted)
+    const rePlain = new RegExp(`(^|\\s|[^\\w])@${meEsc}(?![\\w])`, "i");
+    const reQuoted = new RegExp(`@\"\s*${meEsc}\s*\"`, "i");
+    return rePlain.test(text) || reQuoted.test(text);
   }, [me]);
+
+  // Helper: map color name to Tailwind class
+  const colorClass = useCallback((c?: string) => {
+    switch ((c || "orange").toLowerCase()) {
+      case "red": return "text-red-500";
+      case "green": return "text-green-500";
+      case "blue": return "text-blue-400";
+      case "pink": return "text-pink-400";
+      case "yellow": return "text-yellow-400";
+      case "white": return "text-white";
+      case "cyan": return "text-cyan-400";
+      case "purple": return "text-purple-400";
+      case "violet": return "text-violet-400";
+      case "indigo": return "text-indigo-400";
+      case "teal": return "text-teal-400";
+      case "lime": return "text-lime-400";
+      case "amber": return "text-amber-400";
+      case "emerald": return "text-emerald-400";
+      case "fuchsia": return "text-fuchsia-400";
+      case "sky": return "text-sky-400";
+      case "gray": return "text-gray-400";
+      default: return "text-orange-400";
+    }
+  }, []);
 
   // Start flashing for new messages that mention me (not my own)
   useEffect(() => {
@@ -208,6 +238,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     try { observerRef.current?.disconnect(); } catch {}
   }, []);
 
+  // Track users in a ref for case-preserving normalization
+  const usersRef = useRef<string[]>([]);
+  useEffect(() => { usersRef.current = users; }, [users]);
+
   // Auto-collapse sidebar on small screens and keep it in sync on resize
   useEffect(() => {
     const sync = () => setSidebar(window.innerWidth >= 768);
@@ -231,25 +265,40 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
     ws.current.onmessage = e => {
       const d = JSON.parse(e.data);
-      // central alerts
+      const normalize = (s: string) => {
+        const t = (s || "").trim().replace(/[.]+$/, "");
+        return t ? t[0].toUpperCase() + t.slice(1) : t;
+      };
+      // central alerts (private modal only, do not append to chat)
       if (d.type === "alert") {
-        const text = (d.text || "").toUpperCase().replace(/\.$/, "");
-        const code = (d.code || "").toUpperCase();
-        // Post a SYSTEM line in the timeline as well
-        const sysLine = {
-          id: `alert-${Date.now()}-${Math.random()}`,
-          type: "system",
-          sender: "SYSTEM",
-          text,
-          timestamp: new Date().toISOString(),
-        } as any;
-        setMessages(prev => [...prev, sysLine]);
-        // Also show OS notification for critical alerts
-        if (code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT" || code === "UNBANNED") {
-          notify("SYSTEM", text);
-        } else {
-          notify("SYSTEM", text);
+        const code = String(d.code || "");
+        // Special handling: MUTED with live countdown
+        if (code === "MUTED") {
+          let s = Number(d.seconds || 0) || 0;
+          if (muteIntervalRef.current) { window.clearInterval(muteIntervalRef.current); muteIntervalRef.current = null; }
+          const update = () => {
+            const mm = Math.floor(s / 60).toString().padStart(2, "0");
+            const ss = Math.floor(s % 60).toString().padStart(2, "0");
+            setAlertText(`You are muted. Time left: ${mm}:${ss}`);
+            setAlertButton("OK");
+            setAlertOpen(true);
+          };
+          alertActionRef.current = () => {
+            if (muteIntervalRef.current) { window.clearInterval(muteIntervalRef.current); muteIntervalRef.current = null; }
+          };
+          update();
+          muteIntervalRef.current = window.setInterval(() => {
+            s -= 1;
+            if (s <= 0) {
+              if (muteIntervalRef.current) { window.clearInterval(muteIntervalRef.current); muteIntervalRef.current = null; }
+              setAlertOpen(false);
+            } else {
+              update();
+            }
+          }, 1000);
+          return;
         }
+        const text = normalize(d.text || "");
         const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT";
         showAlert(text, shouldLogout ? () => onLogout() : undefined);
         return;
@@ -257,16 +306,17 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       // Presence events (join/leave): notify and append as SYSTEM message in timeline
       if (d.type === "presence" && typeof d.user === "string" && typeof d.action === "string") {
-        const user = (d.user || "").toUpperCase();
-        const actionRaw = (d.action || "").toUpperCase();
-        const action = actionRaw === "JOIN" ? "HAS JOINED CHAT" : actionRaw === "LEAVE" ? "HAS LEFT CHAT" : actionRaw;
+        const user = String(d.user || ""); // keep original casing for names
+        const actionRaw = String(d.action || "");
+        const action = actionRaw.toLowerCase() === "join" ? "has joined chat" : actionRaw.toLowerCase() === "leave" ? "has left chat" : actionRaw;
+        const text = `${user} ${action}`;
+        // Notify with title=user, body=message
         notify(user, action);
-        // also append a system line to the chat timeline
         const sysMsg = {
           id: `presence-${Date.now()}-${Math.random()}`,
           type: "system",
           sender: "SYSTEM",
-          text: `${user} ${action}`,
+          text,
           timestamp: new Date().toISOString(),
         } as any;
         setMessages(prev => [...prev, sysMsg]);
@@ -289,23 +339,24 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       // Handle clear events (main and DM)
       if (d.type === "clear") {
-        const sys = {
-          id: `clear-${Date.now()}-${Math.random()}`,
-          type: "system",
-          sender: "SYSTEM",
-          text: (d.thread === "dm") ? "DM CLEARED" : "ADMIN CLEARED THE CHAT",
-          timestamp: new Date().toISOString(),
-        } as any;
         if (d.thread === "dm") {
+          // For DM, keep a small inline system line
           if (activeDmRef.current === d.peer) {
+            const sys = {
+              id: `clear-${Date.now()}-${Math.random()}`,
+              type: "system",
+              sender: "SYSTEM",
+              text: "DM cleared",
+              timestamp: new Date().toISOString(),
+            } as any;
             setMessages([sys]);
           }
         } else {
+          // For Main, just clear timeline and wait for server 'system' message
           if (activeDmRef.current === null) {
-            setMessages([sys]);
+            setMessages([]);
           }
         }
-        notify("SYSTEM", sys.text);
         return;
       }
 
@@ -446,13 +497,18 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         if (activeDmRef.current !== null) return;
       }
 
-      if (d.type === "user_list") return setUsers(d.users);
+      if (d.type === "user_list") {
+        setUsers(d.users);
+        if (Array.isArray(d.admins)) setAdmins(d.admins);
+        if (d.tags && typeof d.tags === "object") setTagsMap(d.tags);
+        return;
+      }
 
       // System events notifications and handle clear wording
       if (d.type === "system") {
-        const txt = (d.text || "").toUpperCase();
+        const txt = normalize(String(d.text || ""));
         // If admin cleared the chat, also clear main timeline and show only the system line
-        if (activeDmRef.current === null && /CLEARED THE CHAT/i.test(txt)) {
+        if (activeDmRef.current === null && /cleared the chat/i.test(txt)) {
           notify("SYSTEM", txt);
           return setMessages([{ ...d, sender: "SYSTEM", text: txt }]);
         }
@@ -470,6 +526,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       if (typingStopTimer.current) window.clearTimeout(typingStopTimer.current);
       if (typingHideTimer.current) window.clearTimeout(typingHideTimer.current);
       if (aiUpdateTimer.current) window.clearTimeout(aiUpdateTimer.current);
+      if (muteIntervalRef.current) { window.clearInterval(muteIntervalRef.current); muteIntervalRef.current = null; }
     };
   }, [token]);
 
@@ -497,8 +554,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   // Small mount animation for each message (fast + smooth) — run only once per element
   const animateIn = useCallback((el: HTMLDivElement | null) => {
     if (!el) return;
-    if (el.dataset.animated === "true") return; // prevent re-animating on re-renders
-    el.dataset.animated = "true";
+    if ((el as any).dataset.animated === "true") return; // prevent re-animating on re-renders
+    (el as any).dataset.animated = "true";
     el.style.opacity = "0";
     el.style.transform = "translateY(4px) scale(0.98)";
     el.style.transition = "none";
@@ -518,7 +575,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   }, []);
 
   const showAlert = useCallback((text: string, action?: () => void) => {
-    const t = (text || "").toUpperCase().replace(/\.$/, "");
+    const t = (() => {
+      const s = (text || "").trim().replace(/[.]+$/, "");
+      return s ? s[0].toUpperCase() + s.slice(1) : s;
+    })();
     setAlertText(t);
     setAlertButton("OK");
     alertActionRef.current = action || null;
@@ -544,21 +604,58 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     try { if (el) observerRef.current?.unobserve(el); } catch {}
   }, []);
 
+  const isAiAnywhere = (t: string) => /^\s*@ai\b/i.test(t); // revert to only at start
+  const extractAiPrompt = (t: string) => {
+    const m = t.match(/^\s*@ai\b(.*)$/i);
+    return (m ? m[1] : "").trim();
+  };
+
   const send = async () => {
     if (sending) return;
     const txt = input.trim();
     if (!txt && files.length === 0) return;
 
     // Intercept admin-only commands for non-admins and show modal instead of sending
-    if (!isAdmin && /^(\/kick|\/ban|\/unban|\/clear)\b/i.test(txt)) {
+    if (!isAdmin && /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/tag|\/kickA|\/mkadmin|\/rmadmin)\b/i.test(txt)) {
       showAlert("only admin can use that command");
       return;
     }
+    // Admin command param validation (client-side UX)
+    if (isAdmin) {
+      if(/^\s*\/mute/i.test(txt) && !/^\s*\/mute\s+\"[^\"]+\"\s+\d+\s*$/i.test(txt)){
+        showAlert('usage: /mute "username" minutes');
+        return;
+      }
+      if (/^\s*\/tag/i.test(txt) && !/^\s*\/tag\s+\"[^\"]+\"\s+\"[^\"]+\"(?:\s+\-\w+)?\s*$/i.test(txt)) {
+        showAlert('usage: /tag "username" "tag" [-r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray]');
+        return;
+      }
+      if (/^\s*\/kick/i.test(txt) && !/^\s*\/kick\s+\"[^\"]+\"\s*$/i.test(txt)) {
+        showAlert('usage: /kick "username"');
+        return;
+      }
+      if (/^\s*\/ban/i.test(txt) && !/^\s*\/ban\s+\"[^\"]+\"\s*$/i.test(txt)) {
+        showAlert('usage: /ban "username"');
+        return;
+      }
+      if (/^\s*\/unban/i.test(txt) && !/^\s*\/unban\s+\"[^\"]+\"\s*$/i.test(txt)) {
+        showAlert('usage: /unban "username"');
+        return;
+      }
+      if (/^\s*\/mkadmin/i.test(txt) && !/^\s*\/mkadmin\s+\"[^\"]+\"\s+\S+\s*$/i.test(txt)) {
+        showAlert('usage: /mkadmin "username" superpass');
+        return;
+      }
+      if (/^\s*\/rmadmin/i.test(txt) && !/^\s*\/rmadmin\s+\"[^\"]+\"\s+\S+\s*$/i.test(txt)) {
+        showAlert('usage: /rmadmin "username" superpass');
+        return;
+      }
+    }
 
-    // Validate @ai attachments: allow only a single image
-    if (/^@ai\b/i.test(txt) && files.length > 0) {
+    // Validate @ai attachments: allow only a single image (no other files)
+    if (isAiAnywhere(txt) && files.length > 0) {
       const imgs = files.filter(f => f.type && f.type.startsWith("image"));
-      if (imgs.length !== 1) {
+      if (!(files.length === 1 && imgs.length === 1)) {
         showAlert("attach a single image for @ai image mode");
         return; // keep state so user can adjust
       }
@@ -568,9 +665,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       }
     }
 
-    // @ai mention triggers AI (text-only)
-    if (/^@ai\b/i.test(txt)) {
-      const promptOnly = txt.replace(/^@ai\s*/i, "").trim();
+    // @ai mention triggers AI (anywhere in message)
+    if (isAiAnywhere(txt)) {
+      const promptOnly = extractAiPrompt(txt);
       if (!promptOnly) {
         showAlert("usage: @ai <prompt>");
         return;
@@ -583,10 +680,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         if (imgFile) {
           const up = await api.uploadFile(imgFile, activeDm ? { thread: "dm", peer: activeDm, user: me } : { thread: "main", user: me });
           if (!up?.url) throw new Error("upload failed");
-          ws.current?.send(JSON.stringify({ text: `@ai ${promptOnly}`, image: up.url, image_mime: up.mime, ...threadPayload }));
+          ws.current?.send(JSON.stringify({ text: input, image: up.url, image_mime: up.mime, ...threadPayload }));
         } else {
-          // Send only the @ai command; backend will echo visibly
-          ws.current?.send(JSON.stringify({ text: `@ai ${promptOnly}`, ...threadPayload }));
+          // Send full message; backend will parse @ai anywhere and echo it
+          ws.current?.send(JSON.stringify({ text: input, ...threadPayload }));
         }
         setInput("");
         setFiles([]);
@@ -650,7 +747,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const getDataUrlMime = (u: string) => (u.match(/^data:([^;]+);base64,/i)?.[1] || "");
   const extractFirstUrl = (t?: string) => {
     if (!t) return null;
-    const m = t.match(/(https?:\/\/[^^\s]+|data:[^\s]+)/i);
+    const m = t.match(/(https?:\/\/[^ ^\s]+|data:[^\s]+)/i);
     return m ? m[1] : null;
   };
   const isImgUrl = (u: string) => /^data:image\//i.test(u) || /\.(png|jpe?g|gif|webp|avif)$/i.test(u);
@@ -658,9 +755,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   // Helper: render URLs and @mentions in message text (no background; blue only for active targets)
   const renderRichText = (text: string) => {
-    const parts = text.split(/(@[A-Za-z0-9_]+|https?:\/\/[^^\s]+|data:[^\s]+)/g);
+    // Recognize @"Quoted User" or @name, plus URLs and data URLs
+    const parts = text.split(/(@\"[^\"]+\"|@[A-Za-z0-9_]+|https?:\/\/[^ ^\s]+|data:[^\s]+)/g);
     return parts.map((p, i) => {
       if (!p) return null;
+      if (p.startsWith("@\"")) {
+        const inner = p.slice(2, -1).trim();
+        const active = activeMentions.has(inner.toLowerCase()) || inner.toLowerCase() === "ai";
+        return <span key={i} className={active ? "text-blue-400" : undefined}>@"{inner}"</span>;
+      }
       if (p.startsWith("@")) {
         const name = p.slice(1);
         const active = activeMentions.has(name.toLowerCase());
@@ -673,7 +776,6 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       }
       if (/^data:/i.test(p)) {
         const mime = getDataUrlMime(p);
-        // Show a compact placeholder to avoid flooding the layout
         return (
           <a key={i} href={p} target="_blank" className="underline break-all">[{mime || "data"} url]</a>
         );
@@ -728,7 +830,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         text={alertText}
         buttonLabel={alertButton}
         onButton={() => { setAlertOpen(false); alertActionRef.current?.(); }}
-        onClose={() => setAlertOpen(false)}
+        onClose={() => { setAlertOpen(false); alertActionRef.current?.(); }}
       />
       {/* SIDEBAR */}
       <Sidebar
@@ -741,6 +843,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         setSidebar={setSidebar}
         onSelectDm={(u) => setActiveDm(u)}
         onLogout={onLogout}
+        admins={admins}
+        tags={tagsMap}
       />
 
       {/* CHAT */}
@@ -770,7 +874,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 if (m.sender === "SYSTEM") {
                   return (
                     <div key={m.id} className="flex justify-center mb-2">
-                      <div className="text-xs text-[#cfc7aa]/90 italic">{(m.text || "").toUpperCase()}</div>
+                      <div className="text-xs text-[#cfc7aa]/90 italic">{m.text || ""}</div>
                     </div>
                   );
                 }
@@ -789,6 +893,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const mentionedCurrentUser = (m.type === "message" || m.type === "media") && mentionsMe(m.text || "");
                 const shouldFlash = !mine && mentionedCurrentUser && !!flashMap[m.id];
                 const alignRight = mine; // keep AI spinner on the left
+                // resolve tag for sender
+                const tagVal = (tagsMap as any)[m.sender];
+                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
                 return (
                   <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first ? "mt-3" : ""} mb-2`}>
                     <div
@@ -807,7 +914,13 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {first && (
                         <div className="flex items-baseline gap-2 mb-0.5">
                           <span className={`text-sm font-semibold ${m.sender === "AI" ? "text-blue-400" : (mine ? "text-[#e7dec3]" : "text-[#cfc7aa]")}`}>
-                            {m.sender === "AI" && m.model ? `AI (${m.model})` : m.sender}
+                            {m.sender === "AI" && m.model ? `AI (${m.model})` : (
+                              <>
+                                {m.sender}
+                                {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                                {tagObj && <span className={`${colorClass(tagObj.color)} font-semibold`}> ({tagObj.text})</span>}
+                              </>
+                            )}
                           </span>
                           <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}</span>
                         </div>
@@ -906,7 +1019,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 if (m.sender === "SYSTEM") {
                   return (
                     <div key={m.id} className="flex justify-center mb-2">
-                      <div className="text-xs text-[#cfc7aa]/90 italic">{(m.text || "").toUpperCase()}</div>
+                      <div className="text-xs text-[#cfc7aa]/90 italic">{m.text || ""}</div>
                     </div>
                   );
                 }
@@ -925,6 +1038,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const mentionedCurrentUser = (m.type === "message" || m.type === "media") && mentionsMe(m.text || "");
                 const shouldFlash = !mine && mentionedCurrentUser && !!flashMap[m.id];
                 const alignRight = mine; // keep AI spinner on the left
+                const tagVal = (tagsMap as any)[m.sender];
+                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
                 return (
                   <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first ? "mt-3" : ""} mb-2`}>
                     <div
@@ -943,7 +1058,13 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {first && (
                         <div className="flex items-baseline gap-2 mb-0.5">
                           <span className={`text-sm font-semibold ${m.sender === "AI" ? "text-blue-400" : (mine ? "text-[#e7dec3]" : "text-[#cfc7aa]")}`}>
-                            {m.sender === "AI" && m.model ? `AI (${m.model})` : m.sender}
+                            {m.sender === "AI" && m.model ? `AI (${m.model})` : (
+                              <>
+                                {m.sender}
+                                {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                                {tagObj && <span className={`${colorClass(tagObj.color)} font-semibold`}> ({tagObj.text})</span>}
+                              </>
+                            )}
                           </span>
                           <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}</span>
                         </div>
@@ -1085,7 +1206,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
               ref={fileRef}
               onChange={e => {
                 const selected = Array.from(e.target.files || []);
-                const isAi = /^@ai\b/i.test(input.trim());
+                const isAi = isAiAnywhere(input.trim());
                 if (isAi) {
                   // allow exactly one image for @ai image mode
                   const images = selected.filter(f => f.type && f.type.startsWith("image"));
@@ -1153,7 +1274,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                     }
                   }
                   if (pasted.length) {
-                    const isAi = /^@ai\b/i.test(input.trim());
+                    const isAi = isAiAnywhere(input.trim());
                     if (isAi) {
                       const images = pasted.filter(f => f.type && f.type.startsWith("image"));
                       if (images.length === 0) {
