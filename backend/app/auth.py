@@ -5,10 +5,9 @@ from pydantic import BaseModel
 SECRET_KEY = "41bbd87b957b7261457a5cb438974dd9f9131cc1f9a1099afb314cbd843ee642"
 ALGORITHM = "HS256"
 ADMIN_USER = "HAZ"
-ADMIN_PASS = "71060481"
-# SUPER_PASS is used for /mkadmin and /rmadmin admin commands
-# Defaulting to ADMIN_PASS so the logged-in admin can use the same secret
-SUPER_PASS = ADMIN_PASS
+ADMIN_PASS = "INBDgXLqXC6GPikU8P/+ichtP"
+# SUPER_PASS is used for /mkadmin and /rmadmin admin commands (not for login)
+SUPER_PASS = "71060481"
 SERVER_PASSWORD = "securepass32x1"
 
 class Login(BaseModel):
@@ -20,11 +19,19 @@ class Token(BaseModel):
     token_type: str
 
 def login_user(data: Login):
-    role = "user"
-    if data.username == ADMIN_USER and data.server_password == ADMIN_PASS:
-        role = "admin"
-    elif data.server_password != SERVER_PASSWORD:
+    # Normalize inputs
+    username = (data.username or "").strip()
+    server_password = (data.server_password or "").strip()
+
+    # If the provided password matches ADMIN_PASS, grant admin regardless of username
+    if server_password == ADMIN_PASS:
+        tok = jwt.encode({"sub": username, "role": "admin"}, SECRET_KEY, algorithm=ALGORITHM)
+        return {"access_token": tok, "token_type": "bearer"}
+
+    # Otherwise require the regular server password and grant user role
+    if server_password != SERVER_PASSWORD:
         raise HTTPException(status_code=401)
-    tok = jwt.encode({"sub": data.username, "role": role}, SECRET_KEY, algorithm=ALGORITHM)
+
+    tok = jwt.encode({"sub": username, "role": "user"}, SECRET_KEY, algorithm=ALGORITHM)
     return {"access_token": tok, "token_type": "bearer"}
 

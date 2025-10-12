@@ -299,7 +299,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           return;
         }
         const text = normalize(d.text || "");
-        const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT";
+        const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT" || code === "DUPLICATE";
         showAlert(text, shouldLogout ? () => onLogout() : undefined);
         return;
       }
@@ -616,10 +616,20 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     if (!txt && files.length === 0) return;
 
     // Intercept admin-only commands for non-admins and show modal instead of sending
-    if (!isAdmin && /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/tag|\/kickA|\/mkadmin|\/rmadmin)\b/i.test(txt)) {
-      showAlert("only admin can use that command");
-      return;
+    if (!isAdmin) {
+      const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/kickA|\/mkadmin|\/rmadmin)\b/i;
+      const isTagCmd = /^\s*\/tag\b/i.test(txt);
+      const selfTagOk = /^\s*\/tag\s+(?:myself|\"myself\")\s+\"[^\"]+\"(?:\s+\-\w+)?\s*$/i.test(txt);
+      if (adminOnly.test(txt) || (isTagCmd && !selfTagOk)) {
+        if (isTagCmd && !selfTagOk) {
+          showAlert('you can only tag yourself. use: /tag "myself" "tag" [color]');
+        } else {
+          showAlert('only admin can use that command');
+        }
+        return;
+      }
     }
+
     // Admin command param validation (client-side UX)
     if (isAdmin) {
       if(/^\s*\/mute/i.test(txt) && !/^\s*\/mute\s+\"[^\"]+\"\s+\d+\s*$/i.test(txt)){
@@ -793,22 +803,48 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   // const isImgUrl = (u: string) => { /* duplicate removed */ };
   // const isVidUrl = (u: string) => { /* duplicate removed */ };
 
-  // Browser notifications
+  // Audio ping for notifications (no MP3 needed)
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const playPing = useCallback(() => {
+    try {
+      const AC: any = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AC) return;
+      let ctx = audioCtxRef.current;
+      if (!ctx) {
+        ctx = new AC();
+        audioCtxRef.current = ctx as AudioContext;
+      }
+      if (ctx && (ctx as any).state === "suspended") (ctx as any).resume();
+      const o = (ctx as any).createOscillator();
+      const g = (ctx as any).createGain();
+      o.type = "sine";
+      o.frequency.value = 880; // A5
+      o.connect(g);
+      g.connect((ctx as any).destination);
+      const now = (ctx as any).currentTime;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.08, now + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
+      o.start(now);
+      o.stop(now + 0.15);
+    } catch {}
+  }, []);
+
+  // Notifications
   useEffect(() => {
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});
     }
   }, []);
-
   const notify = useCallback((title: string, body?: string) => {
+    playPing();
     try {
       if (!("Notification" in window)) return;
       if (Notification.permission !== "granted") return;
       const n = new Notification(title, { body });
-      // auto-close after a few seconds
       setTimeout(() => n.close(), 5000);
     } catch {}
-  }, []);
+  }, [playPing]);
 
   return (
     <div className="flex h-screen bg-black text-[#f7f3e8] overflow-hidden">

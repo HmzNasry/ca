@@ -134,6 +134,16 @@ async def ws_handler(ws: WebSocket, token: str):
 
     ip = ws.client.host
 
+    # Reject duplicate usernames (already connected)
+    try:
+        if sub in manager.active:
+            await ws.accept()
+            await ws.send_text(json.dumps({"type": "alert", "code": "DUPLICATE", "text": "USERNAME ALREADY ONLINE"}))
+            await ws.close()
+            return
+    except Exception:
+        pass
+
     # check if banned (username or IP)
     if role != "admin" and (sub in manager.banned_users or ip in manager.banned_ips):
         await ws.accept()
@@ -365,6 +375,89 @@ async def ws_handler(ws: WebSocket, token: str):
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "ONLY ADMIN CAN CLEAR CHAT"}))
                 continue
 
+            # --- Tagging commands (accessible to all) ---
+            # Support non-admin shorthand: /tag myself "tag" [color]
+            m_tag_self_short = re.match(r'^\s*/tag\s+myself\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
+            if m_tag_self_short:
+                tag_text = m_tag_self_short.group(1)
+                color_flag = (m_tag_self_short.group(2) or '').lower()
+                color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
+                manager.tags[sub] = {"text": tag_text, "color": color}
+                await manager._user_list()
+                await manager._system(f"{sub} was tagged {tag_text}", store=False)
+                continue
+
+            # /tag "username" "tag" [color];
+            # - Non-admins can ONLY use: /tag "myself" "tag" [color] (or /tag myself "tag" [color])
+            # - Admins can tag others (respect opt-out)
+            m_tag_any = re.match(r'^\s*/tag\s+"([^"]+)"\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
+            if m_tag_any:
+                target_label = (m_tag_any.group(1) or '').strip()
+                tag_text = m_tag_any.group(2)
+                color_flag = (m_tag_any.group(3) or '').lower()
+                is_admin = (role == "admin") or (sub in manager.promoted_admins)
+                if not is_admin:
+                    if target_label.lower() != "myself":
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'you can only tag yourself. use: /tag "myself" "tag" [color] or /tag myself "tag" [color]'}))
+                        continue
+                    target = sub
+                else:
+                    target = _canonical_user(target_label)
+                color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
+                is_self = target.lower() == sub.lower()
+                # Respect opt-out only when tagging someone else
+                if not is_self and target in manager.tag_rejects:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": f"@{target} has blocked being tagged"}))
+                    continue
+                manager.tags[target] = {"text": tag_text, "color": color}
+                await manager._user_list()
+                await manager._system(f"{target} was tagged {tag_text}", store=False)
+                continue
+
+            # Admin can remove anyone's tag via /rmtag "username"; users can only remove their own tag (no-arg)
+            m_rmtag_other = re.match(r'^\s*/rmtag\s+"([^"]+)"\s*$', txt, re.I)
+            if m_rmtag_other:
+                target_raw = m_rmtag_other.group(1)
+                is_admin = (role == "admin") or (sub in manager.promoted_admins)
+                if not is_admin:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "you can only remove your own tag"}))
+                    continue
+                target = _canonical_user(target_raw)
+                if target in manager.tags:
+                    manager.tags.pop(target, None)
+                    await manager._system(f"{target} tag cleared", store=False)
+                await manager._user_list()
+                continue
+
+            # /rmtag — drop your own tag
+            if re.match(r'^\s*/rmtag\s*$', txt, re.I):
+                if sub in manager.tags:
+                    manager.tags.pop(sub, None)
+                    await manager._user_list()
+                    await manager._system(f"{sub} removed their tag", store=False)
+                else:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "you have no tag"}))
+                continue
+
+            # /rjtag — reject being tagged by others (does not drop current tag)
+            if re.match(r'^\s*/rjtag\s*$', txt, re.I):
+                manager.tag_rejects.add(sub)
+                await manager._user_list()
+                await manager._system(f"{sub} rejects being tagged by others", store=False)
+                continue
+
+            # /actag (or /acptag) — accept tags from others
+            if re.match(r'^\s*/ac(?:p)?tag\s*$', txt, re.I):
+                manager.tag_rejects.discard(sub)
+                await manager._user_list()
+                await manager._system(f"{sub} accepts being tagged by others", store=False)
+                continue
+
+            # Bad /tag usage helper
+            if re.match(r'^\s*/tag\b', txt, re.I) and not re.match(r'^\s*/tag\s+"[^"]+"\s+"[^"]+"(?:\s+\-\w+)?\s*$', txt, re.I):
+                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /tag "myself" "tag" [color] (users) or /tag "username" "tag" [color] (admins). Colors: -r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray'}))
+                continue
+
             # --- Admin commands (Main) ---
             if role == "admin" or sub in manager.promoted_admins:
                 # New: change server password in main (admin only)
@@ -374,66 +467,6 @@ async def ws_handler(ws: WebSocket, token: str):
                     auth_mod.SERVER_PASSWORD = new_pass
                     await manager._system("Server message changed", store=False)
                     logger.info("Server password changed by admin %s", sub)
-                    continue
-
-                # /rjtag — admin opts out of being tagged (remove own user tag but not ADMIN status)
-                if re.match(r'^\s*/rjtag\s*$', txt, re.I):
-                    manager.tag_rejects.add(sub)
-                    # Remove any existing user tag for this admin (ADMIN indicator is separate and untouched)
-                    if sub in manager.tags:
-                        manager.tags.pop(sub, None)
-                        await manager._user_list()
-                        await manager._system(f"{sub} removed their tag", store=False)
-                    else:
-                        await manager._system(f"{sub} rejected being tagged", store=False)
-                    continue
-
-                # /mute "user" <minutes>
-                m_mute = re.match(r'^\s*/mute\s+"([^"]+)"\s+(\d+)\s*$', txt, re.I)
-                if m_mute:
-                    target, mins = m_mute.group(1), int(m_mute.group(2))
-                    target = _canonical_user(target)
-                    # prevent admins from muting other admins (private alert)
-                    if _is_effective_admin(target):
-                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "cannot moderate admins"}))
-                        continue
-                    manager.mute_user(target, mins)
-                    await manager._system(f"{target} was muted for {mins} minutes by admin", store=False)
-                    continue
-
-                # /unmute "user"
-                m_unmute = re.match(r'^\s*/unmute\s+"([^"]+)"\s*$', txt, re.I)
-                if m_unmute:
-                    target = _canonical_user(m_unmute.group(1))
-                    manager.unmute_user(target)
-                    await manager._system(f"{target} was unmuted by admin", store=False)
-                    continue
-
-                # /tag "username" "tag" [color]
-                # color is optional flag among: -r/-red, -g/-green, -b/-blue, -p/-pink, -y/-yellow, -w/-white, -c/-cyan
-                m_tag = re.match(r'^\s*/tag\s+"([^"]+)"\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
-                if m_tag:
-                    target_raw, tag_text, color_flag = m_tag.group(1), m_tag.group(2), (m_tag.group(3) or '').lower()
-                    target = _canonical_user(target_raw)
-                    # block tagging admins who opted out
-                    if _is_effective_admin(target) and target in manager.tag_rejects:
-                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": f"@{target} has blocked being tagged"}))
-                        continue
-                    color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
-                    manager.tags[target] = {"text": tag_text, "color": color}
-                    await manager._user_list()
-                    await manager._system(f"{target} was tagged {tag_text}", store=False)
-                    continue
-
-                # /ctag "username" — clear tag
-                m_ctag = re.match(r'^\s*/ctag\s+"([^"]+)"\s*$', txt, re.I)
-                if m_ctag:
-                    target_raw = m_ctag.group(1)
-                    target = _canonical_user(target_raw)
-                    if target in manager.tags:
-                        manager.tags.pop(target, None)
-                        await manager._system(f"{target} tag cleared", store=False)
-                    await manager._user_list()
                     continue
 
                 # /mkadmin "username" superpass
@@ -551,12 +584,7 @@ async def ws_handler(ws: WebSocket, token: str):
                 if re.match(r'^\s*/rmadmin\b', txt, re.I) and not re.match(r'^\s*/rmadmin\s+"[^"]+"\s+\S+\s*$', txt, re.I):
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /rmadmin "username" superpass'}))
                     continue
-                if re.match(r'^\s*/tag\b', txt, re.I) and not re.match(r'^\s*/tag\s+"[^"]+"\s+"[^"]+"(?:\s+\-\w+)?\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /tag "username" "tag" [-r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray]'}))
-                    continue
-                if re.match(r'^\s*/ctag\b', txt, re.I) and not re.match(r'^\s*/ctag\s+"[^"]+"\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /ctag "username"'}))
-                    continue
+                # removed /ctag usage helper (now /rmtag "username")
                 if re.match(r'^\s*/kick\b', txt, re.I) and not re.match(r'^\s*/kick\s+"[^"]+"\s*$', txt, re.I):
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /kick "username"'}))
                     continue
