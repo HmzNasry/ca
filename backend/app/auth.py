@@ -1,6 +1,6 @@
 from fastapi import HTTPException
 from jose import jwt
-from pydantic import BaseModel
+from .models.auth_models import Login, Token
 
 SECRET_KEY = "41bbd87b957b7261457a5cb438974dd9f9131cc1f9a1099afb314cbd843ee642"
 ALGORITHM = "HS256"
@@ -10,13 +10,6 @@ ADMIN_PASS = "INBDgXLqXC6GPikU8P/+ichtP"
 SUPER_PASS = "71060481"
 SERVER_PASSWORD = "securepass32x1"
 
-class Login(BaseModel):
-    username: str
-    server_password: str
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
 
 def login_user(data: Login):
     # Normalize inputs

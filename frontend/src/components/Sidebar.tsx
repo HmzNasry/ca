@@ -45,6 +45,11 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
         sidebar ? "w-64 opacity-100" : "w-8 opacity-80"
       } flex flex-col bg-[#0a0a0a] border-r border-white/10 rounded-tr-3xl rounded-br-3xl cursor-pointer relative overflow-visible z-20`}
     >
+      <style>{`
+        @keyframes rainbow-shift { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
+        .dev-rainbow { background: linear-gradient(90deg, #ff3b30, #ff9500, #ffcc00, #34c759, #5ac8fa, #007aff, #af52de, #ff3b30); background-size: 400% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: rainbow-shift 6s linear infinite; }
+      `}</style>
+
       <button
         onClick={e => {
           e.stopPropagation();
@@ -68,6 +73,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
             const dmCount = unreadDm[u] || 0;
             const tagVal = (tags as any)[u];
             const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
+            const isDev = !!(tagObj && ((tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow'));
             return (
               <li key={u} className="">
                 <button
@@ -79,8 +85,10 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
                 >
                   <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}>
                     {u}
-                    {isAdminUser && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
-                    {tagObj && <span className={`${colorClass(tagObj.color)} font-semibold`}> ({tagObj.text})</span>}
+                    {isAdminUser && !isDev && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                    {tagObj && (
+                      <span className={`${isDev ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
+                    )}
                   </span>
                   {dmCount > 0 && (
                     <span className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center min-w-6 h-6 px-2 rounded-full bg-red-500/80 text-white text-xs font-bold">

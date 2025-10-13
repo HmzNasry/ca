@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import { LoginScreen } from "./components/LoginScreen";
-import { ChatInterface } from "./components/ChatInterface";
-import { LoadingSplash } from "./components/LoadingSplash";
+import { LoginScreen } from "@/components/auth/LoginScreen";
+import { ChatInterface } from "@/components/chat/ChatInterface";
+import { LoadingSplash } from "@/components/shell/LoadingSplash";
 
 export default function App() {
   const [loading, setLoading] = useState(true);

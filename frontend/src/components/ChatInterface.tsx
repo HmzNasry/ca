@@ -71,7 +71,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   // Active mention targets: online users + 'ai'
   const activeMentions = useMemo(() => {
-    const s = new Set<string>(["ai"]);
+    const s = new Set<string>(["ai", "everyone"]);
     users.forEach(u => s.add(u.toLowerCase()));
     return s;
   }, [users]);
@@ -82,6 +82,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   emoji.allow_native = true;
 
   const isAdmin = admins.includes(me) || role === "admin";
+  // DEV (localhost) is superior: detect my DEV tag and treat as admin-equivalent on client
+  const myTagVal = (tagsMap as any)[me];
+  const myTagObj = typeof myTagVal === 'string' ? { text: myTagVal, color: 'orange' } : (myTagVal || null);
+  const isDevMe = !!(myTagObj && ((myTagObj as any).special === 'dev' || (myTagObj as any).color === 'rainbow' || String((myTagObj as any).text || '').toUpperCase() === 'DEV'));
+  const isAdminEffective = isAdmin || isDevMe;
   const full = (url: string) => (url.startsWith("/") ? location.origin + url : url);
 
   // Ask for notification permission on mount
@@ -113,7 +118,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     // Match @me (word-bounded) or @"me" (quoted)
     const rePlain = new RegExp(`(^|\\s|[^\\w])@${meEsc}(?![\\w])`, "i");
     const reQuoted = new RegExp(`@\"\s*${meEsc}\s*\"`, "i");
-    return rePlain.test(text) || reQuoted.test(text);
+    const everyone = /(^|\s|[^\w])@everyone(?![\w])/i.test(text) || /@"\s*everyone\s*"/i.test(text);
+    return everyone || rePlain.test(text) || reQuoted.test(text);
   }, [me]);
 
   // Helper: map color name to Tailwind class
@@ -346,7 +352,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
               id: `clear-${Date.now()}-${Math.random()}`,
               type: "system",
               sender: "SYSTEM",
-              text: "DM cleared",
+              text: "dm cleared",
               timestamp: new Date().toISOString(),
             } as any;
             setMessages([sys]);
@@ -480,14 +486,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         }
       }
 
-      // Main thread unread counter when off Main and mentioned
+      // Main thread unread counter when mentioned
       if ((d.type === "message" || d.type === "media") && (!d.thread || d.thread === "main") && d.sender) {
         const isHidden = typeof document !== "undefined" && document.hidden;
         const notOnMain = activeDmRef.current !== null;
-        if (notOnMain && typeof d.text === "string" && d.sender !== me && mentionsMe(d.text)) {
+        const isMention = typeof d.text === "string" && d.sender !== me && mentionsMe(d.text || "");
+        if ((notOnMain || isHidden) && isMention) {
           setUnreadMain(c => c + 1);
         }
-        const shouldNotify = (notOnMain || isHidden) && d.sender !== me;
+        const shouldNotify = ((notOnMain && d.sender !== me) || (isHidden && isMention));
         if (shouldNotify) {
           const title = `${d.sender} (Main)`;
           const body = typeof d.text === "string" && d.text ? d.text : (d.mime || "media");
@@ -506,7 +513,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       // System events notifications and handle clear wording
       if (d.type === "system") {
-        const txt = normalize(String(d.text || ""));
+        const txt = String(d.text || ""); // keep lowercase from server
         // If admin cleared the chat, also clear main timeline and show only the system line
         if (activeDmRef.current === null && /cleared the chat/i.test(txt)) {
           notify("SYSTEM", txt);
@@ -612,12 +619,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   const send = async () => {
     if (sending) return;
-    const txt = input.trim();
+    let txt = input.trim();
     if (!txt && files.length === 0) return;
 
     // Intercept admin-only commands for non-admins and show modal instead of sending
-    if (!isAdmin) {
-      const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/kickA|\/mkadmin|\/rmadmin)\b/i;
+    if (!isAdminEffective) {
+      const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag)\b/i;
       const isTagCmd = /^\s*\/tag\b/i.test(txt);
       const selfTagOk = /^\s*\/tag\s+(?:myself|\"myself\")\s+\"[^\"]+\"(?:\s+\-\w+)?\s*$/i.test(txt);
       if (adminOnly.test(txt) || (isTagCmd && !selfTagOk)) {
@@ -628,36 +635,56 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         }
         return;
       }
+      // If starts with '/' and not a recognized public command, block it
+      if (/^\//.test(txt)) {
+        const publicOk = /^\s*\/(tag\b|rmtag\b|rjtag\b|ac(?:p)?tag\b|dm\b)/i.test(txt);
+        if (!publicOk) {
+          showAlert('invalid command');
+          return;
+        }
+      }
     }
 
     // Admin command param validation (client-side UX)
-    if (isAdmin) {
-      if(/^\s*\/mute/i.test(txt) && !/^\s*\/mute\s+\"[^\"]+\"\s+\d+\s*$/i.test(txt)){
+    if (isAdminEffective) {
+      if(/\s*\/mute/i.test(txt) && !/^\s*\/mute\s+(?:"[^"]+"|\S+)\s+\d+\s*$/i.test(txt)){
         showAlert('usage: /mute "username" minutes');
         return;
       }
-      if (/^\s*\/tag/i.test(txt) && !/^\s*\/tag\s+\"[^\"]+\"\s+\"[^\"]+\"(?:\s+\-\w+)?\s*$/i.test(txt)) {
+      if (/^\s*\/tag/i.test(txt) && !/^\s*\/tag\s+"[^"]+"\s+"[^"]+"(?:\s+\-\w+)?\s*$/i.test(txt)) {
         showAlert('usage: /tag "username" "tag" [-r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray]');
         return;
       }
-      if (/^\s*\/kick/i.test(txt) && !/^\s*\/kick\s+\"[^\"]+\"\s*$/i.test(txt)) {
+      if (/^\s*\/kick/i.test(txt) && !/^\s*\/kick\s+"[^"]+"\s*$/i.test(txt)) {
         showAlert('usage: /kick "username"');
         return;
       }
-      if (/^\s*\/ban/i.test(txt) && !/^\s*\/ban\s+\"[^\"]+\"\s*$/i.test(txt)) {
+      if (/^\s*\/ban/i.test(txt) && !/^\s*\/ban\s+"[^"]+"\s*$/i.test(txt)) {
         showAlert('usage: /ban "username"');
         return;
       }
-      if (/^\s*\/unban/i.test(txt) && !/^\s*\/unban\s+\"[^\"]+\"\s*$/i.test(txt)) {
+      if (/^\s*\/unban/i.test(txt) && !/^\s*\/unban\s+"[^"]+"\s*$/i.test(txt)) {
         showAlert('usage: /unban "username"');
         return;
       }
-      if (/^\s*\/mkadmin/i.test(txt) && !/^\s*\/mkadmin\s+\"[^\"]+\"\s+\S+\s*$/i.test(txt)) {
+      if (/^\s*\/mkadmin/i.test(txt) && !/^\s*\/mkadmin\s+"[^"]+"\s+\S+\s*$/i.test(txt)) {
         showAlert('usage: /mkadmin "username" superpass');
         return;
       }
-      if (/^\s*\/rmadmin/i.test(txt) && !/^\s*\/rmadmin\s+\"[^\"]+\"\s+\S+\s*$/i.test(txt)) {
+      if (/^\s*\/rmadmin/i.test(txt) && !/^\s*\/rmadmin\s+"[^"]+"\s+\S+\s*$/i.test(txt)) {
         showAlert('usage: /rmadmin "username" superpass');
+        return;
+      }
+      if (/^\s*\/locktag/i.test(txt) && !/^\s*\/locktag\s+(?:"[^"]+"|\S+)\s*$/i.test(txt)) {
+        showAlert('usage: /locktag "username"');
+        return;
+      }
+      if (/^\s*\/unlocktag/i.test(txt) && !/^\s*\/unlocktag\s+(?:"[^"]+"|\S+)\s*$/i.test(txt)) {
+        showAlert('usage: /unlocktag "username"');
+        return;
+      }
+      if (/^\s*\/unmute/i.test(txt) && !/^\s*\/unmute\s+(?:"[^"]+"|\S+)\s*$/i.test(txt)) {
+        showAlert('usage: /unmute "username"');
         return;
       }
     }
@@ -859,6 +886,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         @keyframes flash-red { 0%,100%{ box-shadow:0 0 0 0 rgba(239,68,68,0); border-color: rgba(239,68,68,0); } 50%{ box-shadow:0 0 0 6px rgba(239,68,68,0.28); border-color: rgba(239,68,68,0.9); } }
         /* composer fade from bottom */
         @keyframes fade-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 0.35; transform: translateY(0); } }
+        /* Animated rainbow gradient text for DEV tag */
+        @keyframes rainbow-shift { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
+        .dev-rainbow { background: linear-gradient(90deg, #ff3b30, #ff9500, #ffcc00, #ffffff, #34c759, #5ac8fa, #007aff, #af52de, #ff3b30); background-size: 400% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: rainbow-shift 6s linear infinite; }
       `}</style>
       {/* Global alert modal */}
       <AlertModal
@@ -916,7 +946,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 }
                 const mine = m.sender === me;
                 const first = i === 0 || messages[i - 1].sender !== m.sender;
-                const canDelete = mine || isAdmin;
+                const canDelete = mine || isAdminEffective;
                 const mime = m.mime || "";
                 const isImage = mime.startswith ? mime.startswith("image") : mime.startsWith("image");
                 const isVideo = mime.startswith ? mime.startsWith("video") : mime.startsWith("video");
@@ -953,8 +983,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
-                                {tagObj && <span className={`${colorClass(tagObj.color)} font-semibold`}> ({tagObj.text})</span>}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {tagObj && (
+                                  <span className={`${(tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
+                                )}
                               </>
                             )}
                           </span>
@@ -1061,7 +1093,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 }
                 const mine = m.sender === me;
                 const first = i === 0 || messages[i - 1].sender !== m.sender;
-                const canDelete = mine || isAdmin; // allow author or admin to delete in Main
+                const canDelete = mine || isAdminEffective; // allow author or admin/dev to delete in Main
                 const mime = m.mime || "";
                 const isImage = typeof mime === "string" && mime.startsWith("image");
                 const isVideo = typeof mime === "string" && mime.startsWith("video");
@@ -1097,8 +1129,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
-                                {tagObj && <span className={`${colorClass(tagObj.color)} font-semibold`}> ({tagObj.text})</span>}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {tagObj && (
+                                  <span className={`${(tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
+                                )}
                               </>
                             )}
                           </span>
