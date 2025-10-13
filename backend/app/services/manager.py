@@ -24,6 +24,8 @@ class ConnMgr:
         self.tag_locks: set[str] = set()
         # mutes
         self.mutes: Dict[str, datetime] = {}
+        # per-DM mutes: key = (receiver, sender)
+        self.dm_mutes: Dict[tuple[str, str], datetime] = {}
         # bans
         self.banned_users: set[str] = set()
         self.banned_ips: set[str] = set()
@@ -67,6 +69,11 @@ class ConnMgr:
             ws = self.active.get(user)
             if not ws:
                 continue
+            # If this is a message/media from 'sender', and 'user' has muted 'sender' in DM, skip delivery
+            if base.get("type") in ("message", "media"):
+                sender = base.get("sender")
+                if sender and self.is_dm_muted(user, sender):
+                    continue
             payload = dict(base)
             payload["peer"] = other
             try:
@@ -193,16 +200,17 @@ class ConnMgr:
         await self._broadcast(payload)
 
     async def _system(self, text: str, store: bool = True):
-        # normalize to lowercase for consistency across all system messages
+        # Capitalize first letter of system messages
         try:
-            s = (text or "").strip().lower()
+            s_raw = (text or "").strip()
+            s = (s_raw[:1].upper() + s_raw[1:]) if s_raw else s_raw
         except Exception:
             s = text
         msg = {
             "id": f"system-{int(datetime.utcnow().timestamp()*1000)}",
             "sender": "SYSTEM",
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "type": "message",
+            "type": "system",
             "text": s,
         }
         if store:
@@ -212,6 +220,7 @@ class ConnMgr:
         await self._broadcast(msg)
 
     async def _broadcast(self, obj: dict):
+        # Persist only main thread user messages/media in history
         if obj.get("type") in ("message", "media") and obj.get("sender") != "SYSTEM" and obj.get("thread", "main") == "main":
             self.history.append(obj)
             if len(self.history) > HISTORY:
@@ -267,6 +276,34 @@ class ConnMgr:
 
     def remaining_mute_seconds(self, username: str) -> int:
         until = self.mutes.get(username)
+        if not until:
+            return 0
+        delta = (until - datetime.utcnow()).total_seconds()
+        return max(int(delta), 0)
+
+    # ---- per-DM mute helpers (receiver mutes sender) ----
+    def mute_dm(self, receiver: str, sender: str, minutes: int):
+        try:
+            mins = max(int(minutes), 0)
+        except Exception:
+            mins = 0
+        until = datetime.utcnow() + timedelta(minutes=mins)
+        self.dm_mutes[(receiver, sender)] = until
+
+    def unmute_dm(self, receiver: str, sender: str):
+        self.dm_mutes.pop((receiver, sender), None)
+
+    def is_dm_muted(self, receiver: str, sender: str) -> bool:
+        until = self.dm_mutes.get((receiver, sender))
+        if not until:
+            return False
+        if datetime.utcnow() >= until:
+            self.dm_mutes.pop((receiver, sender), None)
+            return False
+        return True
+
+    def remaining_dm_mute_seconds(self, receiver: str, sender: str) -> int:
+        until = self.dm_mutes.get((receiver, sender))
         if not until:
             return 0
         delta = (until - datetime.utcnow()).total_seconds()

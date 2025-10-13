@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import TextareaAutosize from "react-textarea-autosize";
-import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown } from "lucide-react";
-import EmojiConvertor from "emoji-js";
+import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown, Ban } from "lucide-react";
 import AlertModal from "@/components/AlertModal";
 
 import * as api from "@/services/api";
@@ -26,6 +25,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const [activeDm, setActiveDm] = useState<string | null>(null); // null = Main Chat, otherwise username
   const [unreadMain, setUnreadMain] = useState(0); // mention pings in Main when not viewing it
   const [unreadDm, setUnreadDm] = useState<Record<string, number>>({}); // future DM pings per user
+  const [blockedDm, setBlockedDm] = useState<Record<string, boolean>>({});
   // typing indicator state
   const [typingUser, setTypingUser] = useState("");
   const [typingVisible, setTypingVisible] = useState(false);
@@ -75,11 +75,6 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     users.forEach(u => s.add(u.toLowerCase()));
     return s;
   }, [users]);
-
-  // emoji conversion for :shortcodes:
-  const emoji = new EmojiConvertor();
-  emoji.replace_mode = "unified";
-  emoji.allow_native = true;
 
   const isAdmin = admins.includes(me) || role === "admin";
   // DEV (localhost) is superior: detect my DEV tag and treat as admin-equivalent on client
@@ -304,6 +299,20 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           }, 1000);
           return;
         }
+        if (code === "DM_BLOCKED") {
+          setBlockedDm(prev => ({ ...prev, [activeDmRef.current || ""]: true }));
+          showAlert("User blocked from dm");
+          return;
+        }
+        if (code === "DM_UNBLOCKED") {
+          setBlockedDm(prev => ({ ...prev, [activeDmRef.current || ""]: false }));
+          showAlert("User unblocked from dm");
+          return;
+        }
+        const normalize = (s: string) => {
+          const t = (s || "").trim().replace(/[.]+$/, "");
+          return t ? t[0].toUpperCase() + t.slice(1) : t;
+        };
         const text = normalize(d.text || "");
         const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT" || code === "DUPLICATE";
         showAlert(text, shouldLogout ? () => onLogout() : undefined);
@@ -513,14 +522,14 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       // System events notifications and handle clear wording
       if (d.type === "system") {
-        const txt = String(d.text || ""); // keep lowercase from server
-        // If admin cleared the chat, also clear main timeline and show only the system line
+        const txt = String(d.text || "");
+        const cap = txt ? txt[0].toUpperCase() + txt.slice(1) : txt;
         if (activeDmRef.current === null && /cleared the chat/i.test(txt)) {
-          notify("SYSTEM", txt);
-          return setMessages([{ ...d, sender: "SYSTEM", text: txt }]);
+          notify("SYSTEM", cap);
+          return setMessages([{ ...d, sender: "SYSTEM", text: cap }]);
         }
-        notify("SYSTEM", txt);
-        return setMessages(p => [...p, { ...d, text: txt }]);
+        notify("SYSTEM", cap);
+        return setMessages(p => [...p, { ...d, text: cap }]);
       }
 
       if (d.id && seen.current.has(d.id)) return;
@@ -625,21 +634,21 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     // Intercept admin-only commands for non-admins and show modal instead of sending
     if (!isAdminEffective) {
       const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag)\b/i;
-      const isTagCmd = /^\s*\/tag\b/i.test(txt);
-      const selfTagOk = /^\s*\/tag\s+(?:myself|\"myself\")\s+\"[^\"]+\"(?:\s+\-\w+)?\s*$/i.test(txt);
-      if (adminOnly.test(txt) || (isTagCmd && !selfTagOk)) {
-        if (isTagCmd && !selfTagOk) {
-          showAlert('you can only tag yourself. use: /tag "myself" "tag" [color]');
+      // allow /clear in DM (scoped)
+      if (/^\s*\/clear\s*$/i.test(txt) && activeDm) {
+        // let it through
+      } else if (adminOnly.test(txt)) {
+        if (/^\s*\/tag\b/i.test(txt)) {
+          showAlert('You can only tag yourself. Use: /tag "myself" "tag" [color]');
         } else {
-          showAlert('only admin can use that command');
+          showAlert('Only admin can use that command');
         }
         return;
       }
-      // If starts with '/' and not a recognized public command, block it
       if (/^\//.test(txt)) {
-        const publicOk = /^\s*\/(tag\b|rmtag\b|rjtag\b|ac(?:p)?tag\b|dm\b)/i.test(txt);
+        const publicOk = /^\s*\/(tag\b|rmtag\b|rjtag\b|ac(?:p)?tag\b|dm\b|clear\b)/i.test(txt);
         if (!publicOk) {
-          showAlert('invalid command');
+          showAlert('Invalid command');
           return;
         }
       }
@@ -648,43 +657,43 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     // Admin command param validation (client-side UX)
     if (isAdminEffective) {
       if(/\s*\/mute/i.test(txt) && !/^\s*\/mute\s+(?:"[^"]+"|\S+)\s+\d+\s*$/i.test(txt)){
-        showAlert('usage: /mute "username" minutes');
+        showAlert('Usage: /mute "username" minutes');
         return;
       }
       if (/^\s*\/tag/i.test(txt) && !/^\s*\/tag\s+"[^"]+"\s+"[^"]+"(?:\s+\-\w+)?\s*$/i.test(txt)) {
-        showAlert('usage: /tag "username" "tag" [-r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray]');
+        showAlert('Usage: /tag "username" "tag" [-r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray]');
         return;
       }
       if (/^\s*\/kick/i.test(txt) && !/^\s*\/kick\s+"[^"]+"\s*$/i.test(txt)) {
-        showAlert('usage: /kick "username"');
+        showAlert('Usage: /kick "username"');
         return;
       }
       if (/^\s*\/ban/i.test(txt) && !/^\s*\/ban\s+"[^"]+"\s*$/i.test(txt)) {
-        showAlert('usage: /ban "username"');
+        showAlert('Usage: /ban "username"');
         return;
       }
       if (/^\s*\/unban/i.test(txt) && !/^\s*\/unban\s+"[^"]+"\s*$/i.test(txt)) {
-        showAlert('usage: /unban "username"');
+        showAlert('Usage: /unban "username"');
         return;
       }
       if (/^\s*\/mkadmin/i.test(txt) && !/^\s*\/mkadmin\s+"[^"]+"\s+\S+\s*$/i.test(txt)) {
-        showAlert('usage: /mkadmin "username" superpass');
+        showAlert('Usage: /mkadmin "username" superpass');
         return;
       }
       if (/^\s*\/rmadmin/i.test(txt) && !/^\s*\/rmadmin\s+"[^"]+"\s+\S+\s*$/i.test(txt)) {
-        showAlert('usage: /rmadmin "username" superpass');
+        showAlert('Usage: /rmadmin "username" superpass');
         return;
       }
       if (/^\s*\/locktag/i.test(txt) && !/^\s*\/locktag\s+(?:"[^"]+"|\S+)\s*$/i.test(txt)) {
-        showAlert('usage: /locktag "username"');
+        showAlert('Usage: /locktag "username"');
         return;
       }
       if (/^\s*\/unlocktag/i.test(txt) && !/^\s*\/unlocktag\s+(?:"[^"]+"|\S+)\s*$/i.test(txt)) {
-        showAlert('usage: /unlocktag "username"');
+        showAlert('Usage: /unlocktag "username"');
         return;
       }
       if (/^\s*\/unmute/i.test(txt) && !/^\s*\/unmute\s+(?:"[^"]+"|\S+)\s*$/i.test(txt)) {
-        showAlert('usage: /unmute "username"');
+        showAlert('Usage: /unmute "username"');
         return;
       }
     }
@@ -693,7 +702,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     if (isAiAnywhere(txt) && files.length > 0) {
       const imgs = files.filter(f => f.type && f.type.startsWith("image"));
       if (!(files.length === 1 && imgs.length === 1)) {
-        showAlert("attach a single image for @ai image mode");
+        showAlert("Attach a single image for @ai image mode");
         return; // keep state so user can adjust
       }
       if (imgs[0].type === "image/gif") {
@@ -706,7 +715,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     if (isAiAnywhere(txt)) {
       const promptOnly = extractAiPrompt(txt);
       if (!promptOnly) {
-        showAlert("usage: @ai <prompt>");
+        showAlert("Usage: @ai <prompt>");
         return;
       }
 
@@ -726,7 +735,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         setFiles([]);
         setShowPicker(false);
       } catch {
-        showAlert("failed to send ai request");
+        showAlert("Failed to send ai request");
       } finally {
         if (fileRef.current) fileRef.current.value = "";
         txtRef.current?.focus();
@@ -763,7 +772,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         }
       }
     } catch (e) {
-      showAlert("failed to send message or upload file(s)");
+      showAlert("Failed to send message or upload file(s)");
     } finally {
       setInput("");
       setFiles([]);
@@ -923,12 +932,28 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
             <h3 className="text-sm text-white tracking-wide flex items-center justify-between">
               <span>{activeDm ? `DM with ${activeDm}` : "Main Chat"}</span>
               {activeDm && (
-                <button
-                  onClick={() => ws.current?.send(JSON.stringify({ text: "/clear", thread: "dm", peer: activeDm }))}
-                  className="ml-3 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl bg-red-600/90 hover:bg-red-700 text-white shadow-[0_0_10px_rgba(255,0,0,0.3)] transition-all"
-                >
-                  <Trash2 className="h-3.5 w-3.5" /> Clear DM
-                </button>
+                <div className="flex items-center">
+                  <button
+                    onClick={() => ws.current?.send(JSON.stringify({ text: "/clear", thread: "dm", peer: activeDm }))}
+                    className="ml-3 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl bg-red-600/90 hover:bg-red-700 text-white shadow-[0_0_10px_rgba(255,0,0,0.3)] transition-all"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> Clear DM
+                  </button>
+                  <button
+                    onClick={() => {
+                      const blocked = blockedDm[activeDm] === true;
+                      if (blocked) {
+                        ws.current?.send(JSON.stringify({ text: `/unmutedm "${activeDm}"`, thread: "dm", peer: activeDm }));
+                      } else {
+                        ws.current?.send(JSON.stringify({ text: `/mutedm "${activeDm}"`, thread: "dm", peer: activeDm }));
+                      }
+                    }}
+                    className={`ml-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl border transition-all ${blockedDm[activeDm] ? "bg-red-900/40 border-red-600 text-red-300" : "bg-white/10 hover:bg-white/20 text-white border-white/10"}`}
+                    title={blockedDm[activeDm] ? "Unblock this user" : "Block this user from DMing you"}
+                  >
+                    <Ban className="h-3.5 w-3.5" /> {blockedDm[activeDm] ? "Unblock DM" : "Block DM"}
+                  </button>
+                </div>
               )}
             </h3>
             <hr className="border-white/10 mt-2 mb-4" />
@@ -1327,7 +1352,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 ref={txtRef}
                 value={input}
                 onChange={e => {
-                  const v = emoji.replace_colons(e.target.value);
+                  const v = e.target.value; // no-op emoji conversion
                   setInput(v);
                   pingTyping(v);
                 }}
@@ -1391,7 +1416,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
             </Button>
             <Button variant="ghost" type="submit" disabled={sending}>
               {sending ? (
-                <Loader2 className="h-5 w-5 text-[#e7dec3] animate-spin" />
+                               <Loader2 className="h-5 w-5 text-[#e7dec3] animate-spin" />
               ) : (
                 <Send className="h-5 w-5 text-[#e7dec3]" />
               )}

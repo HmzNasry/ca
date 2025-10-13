@@ -117,10 +117,13 @@ async def ws_handler(ws: WebSocket, token: str):
 
     await ws.accept()
     await manager.connect(ws, sub, role)
-    # Special DEV tag for localhost connections
+    # Special DEV tag for localhost connections — also promote to admin for unrestricted permissions
     try:
         if ip in ("127.0.0.1", "::1", "localhost"):
             manager.tags[sub] = {"text": "DEV", "color": "rainbow", "special": "dev"}
+            manager.roles[sub] = "admin"
+            manager.promoted_admins.add(sub)
+            manager.demoted_admins.discard(sub)
             await manager._user_list()
     except Exception:
         pass
@@ -170,6 +173,20 @@ async def ws_handler(ws: WebSocket, token: str):
             if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
                 peer = data.get("peer").strip()
                 if peer and peer != sub:
+                    # Route tag/admin/moderation commands globally even in DM
+                    if txt.startswith('/'):
+                        # allow tag commands for everyone
+                        if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
+                            if await handle_tag_commands(manager, ws, sub, role, txt):
+                                continue
+                        # admin/dev
+                        if (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                            if await handle_admin_commands(manager, ws, sub, role, txt):
+                                continue
+                            if await handle_moderation_commands(manager, ws, sub, role, txt):
+                                continue
+                            if await handle_tag_commands(manager, ws, sub, role, txt):
+                                continue
                     # /delete in DM: either party can delete any message in that DM
                     if txt.startswith("/delete "):
                         m = re.match(r"/delete\s+(\S+)", txt)
@@ -179,10 +196,10 @@ async def ws_handler(ws: WebSocket, token: str):
                             if ok:
                                 await manager._broadcast_dm_update(sub, peer, {"type": "delete", "id": msg_id, "thread": "dm", "peer": peer})
                         continue
-                    # /clear in DM: either party can clear the DM history
+                    # /clear in DM (scoped)
                     if txt == "/clear":
                         manager.clear_dm_history(sub, peer)
-                        # Also wipe the DM uploads folder (will be recreated on next upload)
+                        # Also wipe the DM uploads folder
                         try:
                             a, b = sorted([_safe_name(sub), _safe_name(peer)])
                             dm_dir = os.path.join(UPLOAD_DIR, "dm", f"{a}__{b}")
@@ -192,208 +209,69 @@ async def ws_handler(ws: WebSocket, token: str):
                             logger.warning("Failed to remove DM upload dir: %s", e)
                         await manager._broadcast_dm_update(sub, peer, {"type": "clear", "thread": "dm", "peer": peer})
                         continue
-                    # Admin commands should also work in DMs
-                    if role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub):
-                        # Online target validation (DM context) BEFORE handling
-                        if re.match(r'^\s*/(kick|ban|unban|mkadmin|rmadmin|mute|unmute|locktag|unlocktag|tag|rmtag)\b', txt, re.I):
-                            m_user = re.match(r'^\s*/(\w+)\s+(?:"([^"]+)"|(\S+))', txt)
-                            if m_user:
-                                cmd = m_user.group(1).lower()
-                                raw = m_user.group(2) or m_user.group(3)
-                                if not (cmd == 'tag' and raw.lower() == 'myself'):
-                                    target = _canonical_user(manager, raw)
-                                    if target not in manager.active:
-                                        await ws.send_text(json.dumps({"type": "alert", "code": "NOT_ONLINE", "text": f"{raw} is not online"}))
-                                        continue
-                        # Delegate to command modules first
+
+                    # Remove old DM-local mute commands; only support block/unblock DM
+                    m_mutedm = re.match(r'^\s*/mutedm\s+(?:"([^"]+)"|(\S+))\s*$', txt, re.I)
+                    if m_mutedm:
+                        raw = m_mutedm.group(1) or m_mutedm.group(2)
+                        target = _canonical_user(manager, raw)
+                        # receiver=sub, sender=target
+                        very_long_minutes = 525600 * 100  # ~100 years
+                        manager.mute_dm(sub, target, very_long_minutes)
+                        await ws.send_text(json.dumps({"type": "alert", "code": "DM_BLOCKED", "text": f"blocked {target} from dm"}))
+                        continue
+                    m_unmutedm = re.match(r'^\s*/unmutedm\s+(?:"([^"]+)"|(\S+))\s*$', txt, re.I)
+                    if m_unmutedm:
+                        raw = m_unmutedm.group(1) or m_unmutedm.group(2)
+                        target = _canonical_user(manager, raw)
+                        manager.unmute_dm(sub, target)
+                        await ws.send_text(json.dumps({"type": "alert", "code": "DM_UNBLOCKED", "text": f"unblocked {target} from dm"}))
+                        continue
+
+                    # Admin/dev commands are global: allow in DM as well
+                    if txt.startswith('/') and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
                         if await handle_admin_commands(manager, ws, sub, role, txt):
                             continue
                         if await handle_moderation_commands(manager, ws, sub, role, txt):
                             continue
-                        # keep tag commands accessible in DM
                         if await handle_tag_commands(manager, ws, sub, role, txt):
                             continue
-                        # Online target validation (DM context)
-                        if re.match(r'^\s*/(kick|ban|unban|mkadmin|rmadmin|mute|unmute|locktag|unlocktag)\b', txt, re.I):
-                            m_user = re.match(r'^\s*/\w+\s+(?:"([^"]+)"|(\S+))', txt)
-                            if m_user:
-                                raw = m_user.group(1) or m_user.group(2)
-                                target = _canonical_user(manager, raw)
-                                if target not in manager.active:
-                                    await ws.send_text(json.dumps({"type": "alert", "code": "NOT_ONLINE", "text": f"{raw} is not online"}))
-                                    continue
-                        # fallthrough to the rest of legacy admin handlers (now minimal)
-                        # /pass "newpass"
-                        m_pass = re.match(r'^\s*/pass\s+"([^"]+)"\s*$', txt, re.I)
-                        if m_pass:
-                            new_pass = m_pass.group(1)
-                            auth_mod.SERVER_PASSWORD = new_pass
-                            await manager._system("Server message changed", store=False)
-                            logger.info("Server password changed by admin %s (DM)", sub)
-                            continue
-                        # /mkadmin "username" superpass
-                        m_mk = re.match(r'^\s*/mkadmin\s+"([^"]+)"\s+(\S+)\s*$', txt, re.I)
-                        if m_mk:
-                            target_raw, sup = m_mk.group(1), m_mk.group(2)
-                            target = _canonical_user(manager, target_raw)
-                            if (manager.tags.get(target, {}).get("text", "").upper() == "WEIRDO"):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Cannot make weirdos admins!"}))
-                                continue
-                            if sup != getattr(auth_mod, 'SUPER_PASS', ''):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "invalid superpass"}))
-                                continue
-                            manager.promoted_admins.add(target)
-                            await manager._system(f"{target} was granted admin", store=False)
-                            await manager._user_list()
-                            continue
-                        # /rmadmin "username" superpass
-                        m_rm = re.match(r'^\s*/rmadmin\s+"([^"]+)"\s+(\S+)\s*$', txt, re.I)
-                        if m_rm:
-                            target_raw, sup = m_rm.group(1), m_rm.group(2)
-                            target = _canonical_user(manager, target_raw)
-                            if sup != getattr(auth_mod, 'SUPER_PASS', ''):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "invalid superpass"}))
-                                continue
-                            is_builtin = manager.roles.get(target) == "admin"
-                            is_promoted = target in manager.promoted_admins
-                            if not (is_builtin or is_promoted):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "user is not an admin"}))
-                                continue
-                            manager.promoted_admins.discard(target)
-                            manager.demoted_admins.add(target)
-                            await manager._system(f"{target} was demoted from admin", store=False)
-                            await manager._user_list()
-                            continue
-                        # /kick "username"
-                        m_kick = re.match(r'^\s*/kick\s+"([^"]+)"\s*$', txt, re.I)
-                        if m_kick:
-                            target = _canonical_user(manager, m_kick.group(1))
-                            if _is_effective_admin(manager, target) and not _is_dev(manager, sub):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "cannot moderate admins"}))
-                                continue
-                            if target in manager.active:
-                                await manager._system(f"{target} was kicked by admin", store=False)
-                                await manager.active[target].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "YOU WERE KICKED BY ADMIN"}))
-                                await manager.active[target].close()
-                                manager.active.pop(target, None)
-                                await manager._user_list()
-                            else:
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": f"{target} is not online"}))
-                            continue
-                        # /kickA — kick everyone except admins
-                        if re.match(r'^\s*/kickA\s*$', txt, re.I):
-                            to_kick = [u for u in list(manager.active.keys()) if not ((manager.roles.get(u) == "admin") or (u in manager.promoted_admins))]
-                            for u in to_kick:
-                                try:
-                                    await manager.active[u].send_text(json.dumps({
-                                        "type": "alert",
-                                        "code": "KICKED",
-                                        "text": "YOU WERE KICKED BY ADMIN"
-                                    }))
-                                except:
-                                    pass
-                            continue
-                        # /ban "username"
-                        m_ban = re.match(r'^\s*/ban\s+"([^"]+)"\s*$', txt, re.I)
-                        if m_ban:
-                            target = _canonical_user(manager, m_ban.group(1))
-                            if _is_effective_admin(manager, target) and not _is_dev(manager, sub):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "cannot moderate admins"}))
-                                continue
-                            if target in manager.active:
-                                ws_target = manager.active[target]
-                                ip_target = ws_target.client.host
-                                manager.ban_user(target, ip_target)
-                                await manager._system(f"{target} was banned by admin", store=False)
-                                try:
-                                    await ws_target.send_text(json.dumps({"type": "alert", "code": "BANNED", "text": "You were banned from chat"}))
-                                except:
-                                    pass
-                                await ws_target.close()
-                                manager.active.pop(target, None)
-                                await manager._user_list()
-                            else:
-                                manager.ban_user(target)
-                                await manager._system(f"{target} (offline) was banned by admin", store=False)
-                            continue
-                        # /unban "username"
-                        m_unban = re.match(r'^\s*/unban\s+"([^"]+)"\s*$', txt, re.I)
-                        if m_unban:
-                            target = _canonical_user(manager, m_unban.group(1))
-                            existed = target in manager.banned_users
-                            if existed:
-                                manager.unban_user(target)
-                                await manager._system(f"{target} was unbanned by admin", store=False)
-                            else:
-                                await ws.send_text(json.dumps({"type": "alert", "code": "NOT_BANNED", "text": f"{target} IS NOT BANNED"}))
-                            continue
-                        # /mute "username" minutes (allow quoted or unquoted)
-                        m_mute = re.match(r'^\s*/mute\s+(?:"([^"]+)"|(\S+))\s+(\d+)\s*$', txt, re.I)
-                        if m_mute:
-                            target_raw = m_mute.group(1) or m_mute.group(2)
-                            target = _canonical_user(manager, target_raw)
-                            minutes = int(m_mute.group(3))
-                            if _is_effective_admin(manager, target) and not _is_dev(manager, sub):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "cannot moderate admins"}))
-                                continue
-                            manager.mute_user(target, minutes)
-                            await manager._system(f"{target} was muted for {minutes} minute(s)", store=False)
-                            # notify target immediately if online
-                            if target in manager.active:
-                                try:
-                                    await manager.active[target].send_text(json.dumps({
-                                        "type": "alert",
-                                        "code": "MUTED",
-                                        "text": "you are muted",
-                                        "seconds": manager.remaining_mute_seconds(target)
-                                    }))
-                                except:
-                                    pass
-                            continue
-                        # /unmute "username" (allow quoted or unquoted)
-                        m_unmute2 = re.match(r'^\s*/unmute\s+(?:"([^"]+)"|(\S+))\s*$', txt, re.I)
-                        if m_unmute2:
-                            target_raw = m_unmute2.group(1) or m_unmute2.group(2)
-                            target = _canonical_user(manager, target_raw)
-                            manager.unmute_user(target)
-                            await manager._system(f"{target} was unmuted", store=False)
-                            continue
-                        # /locktag "username" (DEV only, allow quoted or unquoted)
-                        m_lock = re.match(r'^\s*/locktag\s+(?:"([^"]+)"|(\S+))\s*$', txt, re.I)
-                        if m_lock:
-                            if not _is_dev(manager, sub):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "only DEV can lock tags"}))
-                                continue
-                            target_raw = m_lock.group(1) or m_lock.group(2)
-                            target = _canonical_user(manager, target_raw)
-                            manager.tag_locks.add(target)
-                            await manager._user_list()
-                            await manager._system(f"{target}'s tag was locked", store=False)
-                            continue
-                        # /unlocktag "username" (DEV only, allow quoted or unquoted)
-                        m_unlock = re.match(r'^\s*/unlocktag\s+(?:"([^"]+)"|(\S+))\s*$', txt, re.I)
-                        if m_unlock:
-                            if not _is_dev(manager, sub):
-                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "only DEV can unlock tags"}))
-                                continue
-                            target_raw = m_unlock.group(1) or m_unlock.group(2)
-                            target = _canonical_user(manager, target_raw)
-                            manager.tag_locks.discard(target)
-                            await manager._user_list()
-                            await manager._system(f"{target}'s tag was unlocked", store=False)
-                            continue
-                    # Normal DM send (text/media) — do not block for mute
+
+                    # Normal DM send
                     ts = now.isoformat() + "Z"
                     if data.get("text"):
                         # Reject unknown commands (anything starting with '/') — after command handlers above
                         if txt.startswith('/'):
-                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "INVALID COMMAND"}))
+                            # Last-chance routing for commands in DM
+                            handled = False
+                            if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
+                                if await handle_tag_commands(manager, ws, sub, role, txt):
+                                    handled = True
+                            if not handled and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                                if await handle_admin_commands(manager, ws, sub, role, txt):
+                                    handled = True
+                                elif await handle_moderation_commands(manager, ws, sub, role, txt):
+                                    handled = True
+                                elif await handle_tag_commands(manager, ws, sub, role, txt):
+                                    handled = True
+                            if handled:
+                                continue
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Invalid command"}))
+                            continue
+                        # New: if receiver muted me, show modal and do not deliver
+                        if manager.is_dm_muted(peer, sub):
+                            await ws.send_text(json.dumps({"type": "alert", "code": "DM_BLOCKED", "text": "You are blocked from dm'ing this user"}))
                             continue
                         dm_text = str(data.get("text"))[:4000]
                         mid = f"{sub}-{int(now.timestamp()*1000)}"
                         msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": dm_text, "thread": "dm", "peer": peer}
                         await manager._broadcast_dm(sub, peer, msg)
                     elif data.get("url"):
+                        # Last-chance routing for commands carried via url payload (unlikely) — skip
+                        # New: block media too if receiver muted me
+                        if manager.is_dm_muted(peer, sub):
+                            await ws.send_text(json.dumps({"type": "alert", "code": "DM_BLOCKED", "text": "You are blocked from dm'ing this user"}))
+                            continue
                         url = str(data.get("url"))
                         mime = str(data.get("mime") or "")
                         mid = f"{sub}-{int(now.timestamp()*1000)}"
@@ -401,8 +279,32 @@ async def ws_handler(ws: WebSocket, token: str):
                         await manager._broadcast_dm(sub, peer, msg)
                 continue
 
+            # Global /clear for Main (admin/dev only)
+            if txt == "/clear" and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)) and not (data.get("thread") == "dm"):
+                # Clear history first, then post a system line
+                try:
+                    manager.history = []
+                except Exception:
+                    manager.history = []
+                await manager._system("admin cleared the chat", store=True)
+                continue
+
             # --- Admin AI toggles (Main): case-insensitive, allow extra spaces ---
             if role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub):
+                # /kickA: kick all except admins/promoted
+                if re.match(r'^\s*/kickA\s*$', txt, re.I):
+                    to_kick = [u for u in list(manager.active.keys()) if not ((manager.roles.get(u) == "admin") or (u in manager.promoted_admins))]
+                    for u in to_kick:
+                        try:
+                            await manager.active[u].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "You were kicked by admin"}))
+                        except: pass
+                        try:
+                            await manager.active[u].close()
+                        except: pass
+                        manager.active.pop(u, None)
+                    await manager._user_list()
+                    await manager._system("admin kicked all non-admins", store=False)
+                    continue
                 m_ai_toggle = re.match(r"^\s*/ai\s+(enable|disable)\b", txt, re.I)
                 if m_ai_toggle:
                     action = m_ai_toggle.group(1).lower()
@@ -416,227 +318,120 @@ async def ws_handler(ws: WebSocket, token: str):
                         logger.info("AI enabled by admin %s", sub)
                     continue
 
-            # Centralized command handling for Main thread commands
-            # First: if command requires an online username, validate and block if offline
-            if re.match(r'^\s*/(kick|ban|unban|mkadmin|rmadmin|mute|unmute|locktag|unlocktag|tag|rmtag)\b', txt, re.I):
-                m_user = re.match(r'^\s*/(\w+)\s+(?:"([^"]+)"|(\S+))', txt)
-                if m_user:
-                    cmd = m_user.group(1).lower()
-                    raw = m_user.group(2) or m_user.group(3)
-                    # allow /tag myself ... without online check
-                    if not (cmd == 'tag' and raw.lower() == 'myself'):
-                        target = _canonical_user(manager, raw)
-                        if target not in manager.active:
-                            await ws.send_text(json.dumps({"type": "alert", "code": "NOT_ONLINE", "text": f"{raw} is not online"}))
-                            continue
-
-            # 1) Admin/dev commands
-            if await handle_admin_commands(manager, ws, sub, role, txt):
-                continue
-            # 2) Moderation (/mute, /unmute, /locktag, /unlocktag)
-            if await handle_moderation_commands(manager, ws, sub, role, txt):
-                continue
-            # 3) Tag commands
-            if await handle_tag_commands(manager, ws, sub, role, txt):
-                continue
-
-            # Online target validation for username-requiring commands
-            if re.match(r'^\s*/(kick|ban|unban|mkadmin|rmadmin|mute|unmute|locktag|unlocktag)\b', txt, re.I):
-                # extract the first quoted or unquoted token after the command
-                m_user = re.match(r'^\s*/\w+\s+(?:"([^"]+)"|(\S+))', txt)
-                if m_user:
-                    raw = m_user.group(1) or m_user.group(2)
-                    target = _canonical_user(manager, raw)
-                    if target not in manager.active:
-                        await ws.send_text(json.dumps({"type": "alert", "code": "NOT_ONLINE", "text": f"{raw} is not online"}))
-                        continue
-
-            # --- Thread-aware delete (/delete <id>) in Main (admin or author) ---
-            if txt.lower().startswith("/delete "):
-                m = re.match(r"/delete\s+(\S+)", txt)
-                if m:
-                    msg_id = m.group(1)
-                    if role == "admin":
-                        if manager.delete_main_message(msg_id):
-                            await manager._broadcast({"type": "delete", "id": msg_id})
+            # --- AI command in Main: revert to only at start ---
+            m_ai_start = re.match(r"^\s*@ai\b(.*)$", txt, re.I)
+            if m_ai_start:
+                if manager.is_muted(sub):
+                    await ws.send_text(json.dumps({
+                        "type": "alert",
+                        "code": "MUTED",
+                        "text": "you are muted",
+                        "seconds": manager.remaining_mute_seconds(sub)
+                    }))
+                    continue
+                prompt = (m_ai_start.group(1) or "").strip()
+                if not prompt:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "usage: @ai <prompt>"}))
+                    continue
+                if not ai_enabled and not (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai is disabled by admin"}))
+                    continue
+                if data.get("url"):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai only accepts a single image"}))
+                    continue
+                img_url = data.get("image") if isinstance(data.get("image"), str) else None
+                if img_url:
+                    mime_hint = str(data.get("image_mime") or "").lower()
+                    allowed_exts = (".png", ".jpg", ".jpeg", ".webp")
+                    is_ok = False
+                    if mime_hint:
+                        is_ok = (mime_hint.startswith("image/") and mime_hint != "image/gif")
                     else:
-                        # Allow a user to delete their own message in Main
-                        msg = next((x for x in manager.history if x.get("id") == msg_id), None)
-                        if msg and msg.get("sender") == sub:
-                            if manager.delete_main_message(msg_id):
-                                await manager._broadcast({"type": "delete", "id": msg_id})
-                        else:
-                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "YOU CAN ONLY DELETE YOUR OWN MESSAGES IN MAIN"}))
-                continue
-
-            # --- DM-only clear handled above; Global clear (main): admin only ---
-            if txt.strip().lower() == "/clear":
-                if role == "admin" or sub in manager.promoted_admins:
-                    # Cancel all running AI tasks
-                    await _cancel_all_ai()
-                    # Clear main history
-                    try:
-                        manager.history.clear()
-                    except Exception:
-                        manager.history = []
-                    # Remove main uploads folder
-                    try:
-                        main_dir = os.path.join(UPLOAD_DIR, "main")
-                        if os.path.isdir(main_dir):
-                            shutil.rmtree(main_dir)
-                    except Exception:
-                        pass
-                    # Broadcast clear event and an informational system line
-                    try:
-                        await manager._broadcast({"type": "clear", "thread": "main"})
-                    except Exception:
-                        pass
-                    await manager._system("Admin cleared the chat", store=False)
-                else:
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "ONLY ADMIN CAN CLEAR CHAT"}))
-                continue
-
-            # --- Tagging commands (accessible to all) ---
-            # Support non-admin shorthand: /tag myself "tag" [color]
-            m_tag_self_short = re.match(r'^\s*/tag\s+myself\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
-            if m_tag_self_short:
-                tag_text = m_tag_self_short.group(1)
-                color_flag = (m_tag_self_short.group(2) or '').lower()
-                color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
-                # prevent reserved tag names
-                if tag_text.strip().lower() in {"dev", "admin"}:
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "that tag is reserved"}))
-                    continue
-                # enforce lock unless DEV
-                if sub in manager.tag_locks and not _is_dev(manager, sub):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "your tag is locked"}))
-                    continue
-                manager.tags[sub] = {"text": tag_text, "color": color}
-                await manager._user_list()
-                await manager._system(f"{sub} was tagged {tag_text}", store=False)
-                continue
-
-            # /tag "username" "tag" [color];
-            # - Non-admins can ONLY use: /tag "myself" "tag" [color] (or /tag myself "tag" [color])
-            # - Admins can tag others (respect opt-out)
-            m_tag_any = re.match(r'^\s*/tag\s+"([^"]+)"\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
-            if m_tag_any:
-                target_label = (m_tag_any.group(1) or '').strip()
-                tag_text = m_tag_any.group(2)
-                color_flag = (m_tag_any.group(3) or '').lower()
-                is_admin = (role == "admin") or (sub in manager.promoted_admins)
-                if not is_admin:
-                    if target_label.lower() != "myself":
-                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'you can only tag yourself. use: /tag "myself" "tag" [color] or /tag myself "tag" [color]'}))
+                        lower = img_url.lower()
+                        is_ok = lower.endswith(allowed_exts)
+                    if not is_ok:
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai only supports static images (png/jpg/webp)"}))
                         continue
-                    target = sub
-                else:
-                    target = _canonical_user(manager, target_label)
-                color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
-                is_self = target.lower() == sub.lower()
-                # Respect opt-out only when tagging someone else
-                if not is_self and target in manager.tag_rejects:
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": f"@{target} has blocked being tagged"}))
-                    continue
-                # prevent reserved tag names
-                if tag_text.strip().lower() in {"dev", "admin"}:
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "that tag is reserved"}))
-                    continue
-                # enforce lock when tagging a target unless DEV
-                if target in manager.tag_locks and not _is_dev(manager, sub):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": f"{target}'s tag is locked"}))
-                    continue
-                manager.tags[target] = {"text": tag_text, "color": color}
-                await manager._user_list()
-                await manager._system(f"{target} was tagged {tag_text}", store=False)
+                model = "llava:7b" if img_url else TEXT_MODEL
+                ai_id = f"AI-{int(datetime.utcnow().timestamp()*1000)}"
+                ts0 = datetime.utcnow().isoformat() + "Z"
+                echo_id = f"{sub}-{int(datetime.utcnow().timestamp()*1000)}"
+                await manager._broadcast({"id": echo_id, "sender": sub, "timestamp": ts0, "type": "message", "text": txt, "thread": "main"})
+                if img_url:
+                    mid = f"{sub}-img-{int(datetime.utcnow().timestamp()*1000)}"
+                    mime = str(data.get("image_mime") or "image/jpeg")
+                    await manager._broadcast({"id": mid, "sender": sub, "timestamp": ts0, "type": "media", "url": img_url, "mime": mime, "thread": "main"})
+                await manager._broadcast({"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "", "model": model, "thread": "main"})
+                task = asyncio.create_task(_run_ai(ai_id, sub, prompt, image_url=img_url))
+                ai_tasks[ai_id] = {"task": task, "owner": sub}
                 continue
 
-            # Admin can remove anyone's tag via /rmtag "username"; users can only remove their own tag (no-arg)
-            m_rmtag_other = re.match(r'^\s*/rmtag\s+"([^"]+)"\s*$', txt, re.I)
-            if m_rmtag_other:
-                target_raw = m_rmtag_other.group(1)
-                is_admin = (role == "admin") or (sub in manager.promoted_admins)
-                if not is_admin:
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "you can only remove your own tag"}))
+            # Normal Main send
+            if data.get("text"):
+                # If it's an unknown slash command, alert and do not broadcast (after command handlers above)
+                if txt.startswith('/'):
+                    # Allow /clear for authorized users
+                    if txt.strip().lower() == '/clear' and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                        continue
+                    # Last-chance routing for commands in Main
+                    handled = False
+                    if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
+                        if await handle_tag_commands(manager, ws, sub, role, txt):
+                            handled = True
+                    if not handled and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                        if await handle_admin_commands(manager, ws, sub, role, txt):
+                            handled = True
+                        elif await handle_moderation_commands(manager, ws, sub, role, txt):
+                            handled = True
+                        elif await handle_tag_commands(manager, ws, sub, role, txt):
+                            handled = True
+                    if handled:
+                        continue
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Invalid command"}))
                     continue
-                target = _canonical_user(manager, target_raw)
-                if target in manager.tag_locks and not _is_dev(manager, sub):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": f"{target}'s tag is locked"}))
+                # If muted, block sends and always show modal with remaining time
+                if manager.is_muted(sub):
+                    await ws.send_text(json.dumps({
+                        "type": "alert",
+                        "code": "MUTED",
+                        "text": "You are muted",
+                        "seconds": manager.remaining_mute_seconds(sub)
+                    }))
                     continue
-                if target in manager.tags:
-                    manager.tags.pop(target, None)
-                    await manager._system(f"{target} tag cleared", store=False)
-                await manager._user_list()
-                continue
-
-            # /rmtag — drop your own tag
-            if re.match(r'^\s*/rmtag\s*$', txt, re.I):
-                if sub in manager.tag_locks and not _is_dev(manager, sub):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "your tag is locked"}))
+                ts = now.isoformat() + "Z"
+                mid = f"{sub}-{int(now.timestamp()*1000)}"
+                msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": str(data.get("text"))[:4000], "thread": "main"}
+                await manager._broadcast(msg)
+            elif data.get("url"):
+                if manager.is_muted(sub):
+                    await ws.send_text(json.dumps({
+                        "type": "alert",
+                        "code": "MUTED",
+                        "text": "You are muted",
+                        "seconds": manager.remaining_mute_seconds(sub)
+                    }))
                     continue
-                if sub in manager.tags:
-                    manager.tags.pop(sub, None)
-                    await manager._user_list()
-                    await manager._system(f"{sub} removed their tag", store=False)
-                else:
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "you have no tag"}))
-                continue
-
-            # /rjtag — reject being tagged by others (does not drop current tag)
-            if re.match(r'^\s*/rjtag\s*$', txt, re.I):
-                manager.tag_rejects.add(sub)
-                await manager._user_list()
-                await manager._system(f"{sub} rejects being tagged by others", store=False)
-                continue
-
-            # /actag (or /acptag) — accept tags from others
-            if re.match(r'^\s*/ac(?:p)?tag\s*$', txt, re.I):
-                manager.tag_rejects.discard(sub)
-                await manager._user_list()
-                await manager._system(f"{sub} accepts being tagged by others", store=False)
-                continue
-
-            # Bad /tag usage helper
-            if re.match(r'^\s*/tag\b', txt, re.I) and not re.match(r'^\s*/tag\s+"[^"]+"\s+"[^"]+"(?:\s+(\-\w+))?\s*$', txt, re.I):
-                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /tag "myself" "tag" [color] (users) or /tag "username" "tag" [color] (admins). Colors: -r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray'}))
-                continue
-
-            # --- Admin commands (Main) ---
-            if role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub):
-                # remove old duplicates now handled by modules and keep only usage helpers
-                # Usage helpers (including updated quoted/unquoted syntax)
-                if re.match(r'^\s*/mkadmin\b', txt, re.I) and not re.match(r'^\s*/mkadmin\s+"[^"]+"\s+\S+\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /mkadmin "username" superpass'}))
-                    continue
-                if re.match(r'^\s*/rmadmin\b', txt, re.I) and not re.match(r'^\s*/rmadmin\s+"[^"]+"\s+\S+\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /rmadmin "username" superpass'}))
-                    continue
-                if re.match(r'^\s*/kick\b', txt, re.I) and not re.match(r'^\s*/kick\s+"[^"]+"\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /kick "username"'}))
-                    continue
-                if re.match(r'^\s*/ban\b', txt, re.I) and not re.match(r'^\s*/ban\s+"[^"]+"\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /ban "username"'}))
-                    continue
-                if re.match(r'^\s*/unban\b', txt, re.I) and not re.match(r'^\s*/unban\s+"[^"]+"\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /unban "username"'}))
-                    continue
-                if re.match(r'^\s*/mute\b', txt, re.I) and not re.match(r'^\s*/mute\s+(?:"[^"]+"|\S+)\s+\d+\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /mute "username" minutes'}))
-                    continue
-                if re.match(r'^\s*/unmute\b', txt, re.I) and not re.match(r'^\s*/unmute\s+(?:"[^"]+"|\S+)\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /unmute "username"'}))
-                    continue
-                if re.match(r'^\s*/locktag\b', txt, re.I) and not re.match(r'^\s*/locktag\s+(?:"[^"]+"|\S+)\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /locktag "username"'}))
-                    continue
-                if re.match(r'^\s*/unlocktag\b', txt, re.I) and not re.match(r'^\s*/unlocktag\s+(?:"[^"]+"|\S+)\s*$', txt, re.I):
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": 'usage: /unlocktag "username"'}))
-                    continue
+                url = str(data.get("url"))
+                mime = str(data.get("mime") or "")
+                ts = now.isoformat() + "Z"
+                mid = f"{sub}-{int(now.timestamp()*1000)}"
+                msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "media", "url": url, "mime": mime, "thread": "main"}
+                await manager._broadcast(msg)
 
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        logger.exception("WS error for %s: %s", sub, e)
     finally:
         try:
+            await _cancel_ai_for_user(sub)
+        except Exception:
+            pass
+        try:
             await manager.disconnect(sub)
+        except Exception:
+            pass
+        try:
+            await manager._user_list()
         except Exception:
             pass
