@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import TextareaAutosize from "react-textarea-autosize";
 import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown, Ban } from "lucide-react";
+import EmojiConvertor from "emoji-js";
 import AlertModal from "@/components/AlertModal";
 
 import * as api from "@/services/api";
@@ -75,6 +76,13 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     users.forEach(u => s.add(u.toLowerCase()));
     return s;
   }, [users]);
+
+  // Emoji shortcode support (:joy: -> 😀)
+  const emoji = useMemo(() => {
+    const e = new (EmojiConvertor as any)();
+    try { e.replace_mode = "unified"; e.allow_native = true; } catch {}
+    return e;
+  }, []);
 
   const isAdmin = admins.includes(me) || role === "admin";
   // DEV (localhost) is superior: detect my DEV tag and treat as admin-equivalent on client
@@ -315,6 +323,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         };
         const text = normalize(d.text || "");
         const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT" || code === "DUPLICATE";
+        if (code === "DUPLICATE") {
+          try {
+            localStorage.removeItem("chat-username");
+            localStorage.setItem("chat-login-error", "Username already online. Pick a different name.");
+          } catch {}
+        }
         showAlert(text, shouldLogout ? () => onLogout() : undefined);
         return;
       }
@@ -656,7 +670,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
     // Admin command param validation (client-side UX)
     if (isAdminEffective) {
-      if(/\s*\/mute/i.test(txt) && !/^\s*\/mute\s+(?:"[^"]+"|\S+)\s+\d+\s*$/i.test(txt)){
+      if(/^\s*\/mute/i.test(txt) && !/^\s*\/mute\s+(?:"[^"]+"|\S+)\s+\d+\s*$/i.test(txt)){
         showAlert('Usage: /mute "username" minutes');
         return;
       }
@@ -801,6 +815,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   // Helper: render URLs and @mentions in message text (no background; blue only for active targets)
   const renderRichText = (text: string) => {
+    // First, convert :shortcodes: to unicode
+    try { text = emoji.replace_colons(text); } catch {}
     // Recognize @"Quoted User" or @name, plus URLs and data URLs
     const parts = text.split(/(@\"[^\"]+\"|@[A-Za-z0-9_]+|https?:\/\/[^ ^\s]+|data:[^\s]+)/g);
     return parts.map((p, i) => {
@@ -1352,7 +1368,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 ref={txtRef}
                 value={input}
                 onChange={e => {
-                  const v = e.target.value; // no-op emoji conversion
+                  let v = e.target.value;
+                  try { v = emoji.replace_colons(v); } catch {}
                   setInput(v);
                   pingTyping(v);
                 }}

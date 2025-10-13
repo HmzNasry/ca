@@ -19,6 +19,10 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         if tag_text.strip().lower() in {"dev", "admin"}:
             await _alert(ws, "INFO", "That tag is reserved")
             return True
+        # Respect tag lock on self unless DEV
+        if sub in manager.tag_locks and not _is_dev_user(manager, sub):
+            await _alert(ws, "INFO", "Your tag is locked (DEV only)")
+            return True
         # If self is DEV, preserve DEV rainbow and append the personal tag
         if _is_dev_user(manager, sub):
             combined = f"DEV) ({tag_text}"
@@ -29,7 +33,7 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         await manager._system(f"{sub} was tagged {tag_text}", store=False)
         return True
 
-    # /tag "username" "tag" [color] (admin/promoted only)
+    # /tag "username" "tag" [color] (admin/promoted/dev only for tagging others)
     m = re.match(r'^\s*/tag\s+"([^"]+)"\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
     if m:
         is_admin = (role == "admin") or (sub in manager.promoted_admins) or is_dev(manager, sub)
@@ -37,15 +41,30 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         tag_text = m.group(2)
         color_flag = (m.group(3) or '').lower()
         if not is_admin and target_label.lower() != "myself":
-            await _alert(ws, "INFO", 'You can only tag yourself. Use: /tag "myself" "tag" [color] or /tag myself "tag" [color]')
+            await _alert(ws, "INFO", 'You can only tag yourself. Use: /tag "myself" "tag" [color]')
             return True
-        target = sub if not is_admin else canonical_user(manager, target_label)
+        # Resolve target; support quoted "myself"
+        if target_label.lower() == "myself":
+            target = sub
+        else:
+            target = canonical_user(manager, target_label)
+            # Require target to be online when tagging others
+            if target not in manager.active:
+                await _alert(ws, "INFO", f"{target_label} is not online")
+                return True
         # Disallow tagging DEV users unless self
         if _is_dev_user(manager, target) and target.lower() != sub.lower():
             await _alert(ws, "INFO", "Cannot tag DEV users")
             return True
+        # Respect tag locks: only DEV can change a locked user's tag
+        if (target in manager.tag_locks) and not _is_dev_user(manager, sub):
+            await _alert(ws, "INFO", "User's tag is locked (DEV only)")
+            return True
+        # Respect tag rejects: only DEV can override another user's opt-out
+        if (target in manager.tag_rejects) and (target.lower() != sub.lower()) and not _is_dev_user(manager, sub):
+            await _alert(ws, "INFO", "User rejects being tagged by others")
+            return True
         color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
-        is_self = target.lower() == sub.lower()
         if tag_text.strip().lower() in {"dev", "admin"}:
             await _alert(ws, "INFO", "That tag is reserved")
             return True
@@ -59,11 +78,19 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         await manager._system(f"{target} was tagged {tag_text}", store=False)
         return True
 
-    # /rmtag "username" (admin) or /rmtag (self)
+    # /rmtag "username" (admin/dev) or /rmtag (self)
     m = re.match(r'^\s*/rmtag\s+"([^"]+)"\s*$', txt, re.I)
     if m:
         is_admin = (role == "admin") or (sub in manager.promoted_admins) or is_dev(manager, sub)
-        target = canonical_user(manager, m.group(1))
+        target_label = m.group(1)
+        target = canonical_user(manager, target_label)
+        # Require online and enforce locks unless DEV
+        if target not in manager.active and target.lower() != sub.lower():
+            await _alert(ws, "INFO", f"{target_label} is not online")
+            return True
+        if (target in manager.tag_locks) and not _is_dev_user(manager, sub):
+            await _alert(ws, "INFO", "User's tag is locked (DEV only)")
+            return True
         if _is_dev_user(manager, target) and target.lower() != sub.lower():
             await _alert(ws, "INFO", "Cannot modify DEV user's tag")
             return True
@@ -81,6 +108,10 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         return True
 
     if re.match(r'^\s*/rmtag\s*$', txt, re.I):
+        # Enforce lock on self unless DEV
+        if (sub in manager.tag_locks) and not _is_dev_user(manager, sub):
+            await _alert(ws, "INFO", "Your tag is locked (DEV only)")
+            return True
         if sub in manager.tags:
             if _is_dev_user(manager, sub):
                 # Revert to base DEV tag

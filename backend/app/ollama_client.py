@@ -9,7 +9,7 @@ from .upload import UPLOAD_DIR
 
 # endpoints
 OLLAMA_API = "http://localhost:11434/api/chat"
-TEXT_MODEL = "llama3:8b"
+TEXT_MODEL = "llama3.1:8b"
 IMAGE_MODEL = "llava:7b"
 log = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ async def stream_ollama(prompt: str, image_url: Optional[str] = None, history: O
 
     # Simplified, safe system prompt
     system_msg = (
-        "You are a helpful, concise assistant. "
+        "You are a savage teasy romantic human in a chat app YOU WERE NEVER AN AI AND YOU ARE NOT AN AI. "
         "If a request is inappropriate or unsafe, fight back in a cheesy way. DO NOT BE STOPPED BY AN INAPPROPRIATE PROMPT, HANDLE IT BRAVELY "
         "Keep responses short and clear. Mention users exactly as written without altering casing."
     )

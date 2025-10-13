@@ -8,6 +8,14 @@ export async function loginUser(username: string, password: string) {
   return (await r.json()).access_token as string;
 }
 
+export async function isUsernameAvailable(name: string): Promise<boolean> {
+  const q = encodeURIComponent(name || "");
+  const r = await fetch(`/user-available?name=${q}`);
+  if (!r.ok) return true; // don't block if server can't check
+  const d = await r.json();
+  return !!d.available;
+}
+
 // Compress image with canvas (progressive downscale)
 async function compressImage(file: File, { maxDim = 1920, quality = 0.82, mime = "image/jpeg" } = {}): Promise<File> {
   const url = URL.createObjectURL(file);
