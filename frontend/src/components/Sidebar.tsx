@@ -12,6 +12,7 @@ export interface SidebarProps {
   onLogout: () => void;
   admins?: string[];
   tags?: Record<string, { text: string; color?: string } | string>;
+  isMobile?: boolean; // mobile overlay mode
 }
 
 function colorClass(c?: string) {
@@ -37,30 +38,38 @@ function colorClass(c?: string) {
   }
 }
 
-export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sidebar, setSidebar, onSelectDm, onLogout, admins = [], tags = {} }: SidebarProps) {
+export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sidebar, setSidebar, onSelectDm, onLogout, admins = [], tags = {}, isMobile = false }: SidebarProps) {
+  // For mobile we slide almost completely off-screen leaving a ~34px handle (chevron pill).
+  // For desktop we shrink width to a slim rail.
+  const mobileCollapsedTranslate = '-translate-x-[calc(100%-2.15rem)]'; // leaves ~34px (2.15rem) visible (including padding/border)
   return (
     <aside
-      onClick={() => !sidebar && setSidebar(true)}
-      className={`transition-[width] duration-300 ease-out ${
-        sidebar ? "w-64 opacity-100" : "w-8 opacity-80"
-      } flex flex-col bg-[#0a0a0a] border-r border-white/10 rounded-tr-3xl rounded-br-3xl cursor-pointer relative overflow-visible z-20`}
+      onClick={() => { if (!isMobile && !sidebar) setSidebar(true); }}
+      className={`h-full flex flex-col bg-[#0a0a0a]/95 backdrop-blur-sm border-r border-white/10 ${isMobile ? (sidebar ? 'rounded-tr-3xl rounded-br-3xl' : 'rounded-tr-3xl rounded-br-3xl') : 'rounded-tr-3xl rounded-br-3xl'} ${isMobile ? 'cursor-default' : 'cursor-pointer'} relative shadow-xl transition-all duration-300 ease-out will-change-transform
+        ${isMobile ? (sidebar ? 'w-64 translate-x-0' : `w-64 ${mobileCollapsedTranslate}`) : (sidebar ? 'w-64' : 'w-12')} ${isMobile && !sidebar ? 'pointer-events-none' : ''}
+      `}
     >
       <style>{`
         @keyframes rainbow-shift { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
-        .dev-rainbow { background: linear-gradient(90deg, #ff3b30, #ff9500, #ffcc00, #34c759, #5ac8fa, #007aff, #af52de, #ff3b30); background-size: 400% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: rainbow-shift 6s linear infinite; }
+        .dev-rainbow { background: linear-gradient(90deg, #ff3b30, #ff9500, #ffcc00, #ffffffff, #34c759, #5ac8fa, #007aff, #af52de, #ff3b30); background-size: 400% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: rainbow-shift 6s linear infinite; }
       `}</style>
-
+      {/* Chevron / handle pill */}
       <button
-        onClick={e => {
-          e.stopPropagation();
-          setSidebar(!sidebar);
-        }}
-        className={`absolute right-0 top-1/2 translate-x-1/2 -translate-y-1/2 bg-[#0a0a0a] border border-white/10 text-[#e7dec3] text-[34px] font-bold rounded-full px-[7px] pb-[3px] hover:scale-110 transition-transform z-50`}
+        onClick={e => { e.stopPropagation(); setSidebar(!sidebar); }}
+        className={`absolute top-1/2 -translate-y-1/2 ${
+          sidebar
+            ? 'right-0 translate-x-1/2'
+            : (isMobile
+                ? 'right-0 translate-x-1/2' // mobile already slides; keep at edge
+                : 'right-0 translate-x-1/2') // desktop collapsed: keep at outer edge, not centered
+        } bg-[#0a0a0a] border border-white/15 text-[#e7dec3] text-[32px] leading-none font-bold rounded-full px-[9px] py-[6px] pb-[10px] flex items-center justify-center hover:scale-110 active:scale-95 transition-transform z-50 shadow-md pointer-events-auto`}
+        style={{ borderRadius: '9999px' }}
+        aria-label={sidebar ? 'Collapse sidebar' : 'Expand sidebar'}
       >
-        {sidebar ? "‹" : "›"}
+        {sidebar ? '‹' : '›'}
       </button>
 
-      <div className={`flex flex-col h-full overflow-hidden ${sidebar ? "transition-[opacity,transform] duration-200 ease-out opacity-100 translate-x-0" : "hidden"}`}>
+  <div className={`flex flex-col h-full overflow-hidden ${sidebar ? 'opacity-100' : 'opacity-0 pointer-events-none'} transition-opacity duration-200 ease-out` }>
         <h2 className="text-lg font-semibold text-center mt-3 mb-2">
           Online Users
         </h2>
@@ -72,7 +81,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
             const selected = activeDm === u;
             const dmCount = unreadDm[u] || 0;
             const tagVal = (tags as any)[u];
-            const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
+            const tagObj = typeof tagVal === 'string' ? { textq: tagVal, color: 'orange' } : (tagVal || null);
             const isDev = !!(tagObj && ((tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow'));
             return (
               <li key={u} className="">

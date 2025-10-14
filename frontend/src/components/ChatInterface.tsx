@@ -274,10 +274,6 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
     ws.current.onmessage = e => {
       const d = JSON.parse(e.data);
-      const normalize = (s: string) => {
-        const t = (s || "").trim().replace(/[.]+$/, "");
-        return t ? t[0].toUpperCase() + t.slice(1) : t;
-      };
       // central alerts (private modal only, do not append to chat)
       if (d.type === "alert") {
         const code = String(d.code || "");
@@ -317,11 +313,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           showAlert("User unblocked from dm");
           return;
         }
-        const normalize = (s: string) => {
-          const t = (s || "").trim().replace(/[.]+$/, "");
-          return t ? t[0].toUpperCase() + t.slice(1) : t;
-        };
-        const text = normalize(d.text || "");
+  const textRaw2 = d.text || "";
+  const t2 = (textRaw2 || "").trim().replace(/[.]+$/, "");
+  const text = t2 ? t2[0].toUpperCase() + t2.slice(1) : t2;
         const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT" || code === "DUPLICATE";
         if (code === "DUPLICATE") {
           try {
@@ -492,7 +486,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         typingHideTimer.current = window.setTimeout(() => setTypingUser(""), 120);
       }
 
-      // Route DM events and update unread counters
+      // Route DM events and update unread counters + toast when sidebar collapsed
       if ((d.type === "message" || d.type === "media") && d.thread === "dm" && typeof d.peer === "string") {
         const isHidden = typeof document !== "undefined" && document.hidden;
         // If not on that DM thread, raise unread and do not render here
@@ -501,6 +495,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           const title = `${d.sender} sent you a message (DM)`;
           const body = typeof d.text === "string" && d.text ? d.text : (d.mime || "media");
           if (d.sender !== me) notify(title, body);
+          scheduleDmToast(d.sender === me ? d.peer : d.sender);
           return;
         } else if (isHidden && d.sender !== me) {
           const title = `${d.sender} sent you a message (DM)`;
@@ -509,22 +504,20 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         }
       }
 
-      // Main thread unread counter when mentioned
+      // Main thread notifications / unread when off main OR mention OR tab hidden
       if ((d.type === "message" || d.type === "media") && (!d.thread || d.thread === "main") && d.sender) {
         const isHidden = typeof document !== "undefined" && document.hidden;
-        const notOnMain = activeDmRef.current !== null;
+        const notOnMain = activeDmRef.current !== null; // user is in a DM
         const isMention = typeof d.text === "string" && d.sender !== me && mentionsMe(d.text || "");
-        if ((notOnMain || isHidden) && isMention) {
-          setUnreadMain(c => c + 1);
-        }
-        const shouldNotify = ((notOnMain && d.sender !== me) || (isHidden && isMention));
-        if (shouldNotify) {
+        // Increment unread counter only for mentions when off main or hidden
+        if ((notOnMain || isHidden) && isMention) setUnreadMain(c => c + 1);
+        // Notify if off main (any message not from me) OR hidden and mention
+        if ((notOnMain && d.sender !== me) || (isHidden && (isMention || d.sender !== me))) {
           const title = `${d.sender} (Main)`;
           const body = typeof d.text === "string" && d.text ? d.text : (d.mime || "media");
           notify(title, body);
         }
-        // If currently viewing a DM, don't append main messages to the DM timeline
-        if (activeDmRef.current !== null) return;
+        if (activeDmRef.current !== null) return; // don't render main messages while viewing DM
       }
 
       if (d.type === "user_list") {
@@ -647,7 +640,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
     // Intercept admin-only commands for non-admins and show modal instead of sending
     if (!isAdminEffective) {
-      const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag)\b/i;
+      const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag|\/purgeadmin|\/muteA|\/psa)\b/i;
       // allow /clear in DM (scoped)
       if (/^\s*\/clear\s*$/i.test(txt) && activeDm) {
         // let it through
@@ -670,16 +663,24 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
     // Admin command param validation (client-side UX)
     if (isAdminEffective) {
-      if(/^\s*\/mute/i.test(txt) && !/^\s*\/mute\s+(?:"[^"]+"|\S+)\s+\d+\s*$/i.test(txt)){
+      if(/^\s*\/mute\b/i.test(txt) && !/^\s*\/mute\s+(?:"[^"]+"|\S+)\s+\d+\s*$/i.test(txt)){
         showAlert('Usage: /mute "username" minutes');
+        return;
+      }
+      if(/^\s*\/muteA/i.test(txt) && !/^\s*\/muteA\s+\d+\s*$/i.test(txt)) {
+        showAlert('Usage: /muteA minutes');
         return;
       }
       if (/^\s*\/tag/i.test(txt) && !/^\s*\/tag\s+"[^"]+"\s+"[^"]+"(?:\s+\-\w+)?\s*$/i.test(txt)) {
         showAlert('Usage: /tag "username" "tag" [-r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray]');
         return;
       }
-      if (/^\s*\/kick/i.test(txt) && !/^\s*\/kick\s+"[^"]+"\s*$/i.test(txt)) {
+      if (/^\s*\/kick\b/i.test(txt) && !/^\s*\/kick\s+"[^"]+"\s*$/i.test(txt)) {
         showAlert('Usage: /kick "username"');
+        return;
+      }
+      if (/^\s*\/psa/i.test(txt) && !/^\s*\/psa\s+"[^"]+"\s*$/i.test(txt)) {
+        showAlert('Usage: /psa "message"');
         return;
       }
       if (/^\s*\/ban/i.test(txt) && !/^\s*\/ban\s+"[^"]+"\s*$/i.test(txt)) {
@@ -898,8 +899,28 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     } catch {}
   }, [playPing]);
 
+  // Track last DM toast visibility
+  const [dmToast, setDmToast] = useState<{ user: string; id: number } | null>(null);
+  const sidebarRef = useRef(true);
+  useEffect(() => { sidebarRef.current = sidebar; }, [sidebar]);
+  const scheduleDmToast = useCallback((user: string) => {
+    if (sidebarRef.current) return; // only when collapsed
+    setDmToast({ user, id: Date.now() });
+    window.setTimeout(() => {
+      setDmToast(t => (t && Date.now() - t.id >= 4800 ? null : t));
+    }, 5000);
+  }, []);
+
+  // totalUnreadDm removed (was used only by removed mobile button); unread counts still available individually
+  const [isMobile, setIsMobile] = useState<boolean>(typeof window !== 'undefined' ? window.innerWidth < 768 : false);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   return (
-    <div className="flex h-screen bg-black text-[#f7f3e8] overflow-hidden">
+    <div className="flex h-screen bg-black text-[#f7f3e8] overflow-hidden relative">
       {/* utilities */}
       <style>{`
         /* hide scrollbars but keep scroll */
@@ -923,23 +944,33 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         onButton={() => { setAlertOpen(false); alertActionRef.current?.(); }}
         onClose={() => { setAlertOpen(false); alertActionRef.current?.(); }}
       />
-      {/* SIDEBAR */}
-      <Sidebar
-        users={users}
-        me={me}
-        activeDm={activeDm}
-        unreadDm={unreadDm}
-        unreadMain={unreadMain}
-        sidebar={sidebar}
-        setSidebar={setSidebar}
-        onSelectDm={(u) => setActiveDm(u)}
-        onLogout={onLogout}
-        admins={admins}
-        tags={tagsMap}
-      />
+      {/* Backdrop only for mobile overlay */}
+      {isMobile && sidebar && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-30" onClick={()=>setSidebar(false)} />
+      )}
+  <div className={isMobile ? 'fixed inset-y-0 left-0 z-40' : `relative z-20 h-full transition-all duration-300 ${sidebar ? 'w-64' : 'w-12'}`}>
+        <Sidebar
+          users={users}
+          me={me}
+          activeDm={activeDm}
+          unreadDm={unreadDm}
+          unreadMain={unreadMain}
+          sidebar={sidebar}
+          setSidebar={setSidebar}
+          onSelectDm={(u) => { setActiveDm(u); if (isMobile) setSidebar(false); }}
+          onLogout={onLogout}
+          admins={admins}
+          tags={tagsMap}
+          isMobile={isMobile}
+        />
+      </div>
+
+      {/* Mobile open button removed per revised requirements (chevron only). */}
+
+      {/* (mobile floating toggle removed per updated design) */}
 
       {/* CHAT */}
-      <main className="flex-1 flex flex-col bg-black relative">
+  <main className={`flex-1 flex flex-col bg-black relative transition-[padding] duration-300 ${isMobile && !sidebar ? 'pl-10' : 'pl-0'}`}>
         {/* Removed top notch banner when sidebar is collapsed */}
         {/* previously showed: DM/Main label floating at top when sidebar hidden */}
 
@@ -1272,6 +1303,20 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
             </>
           )}
         </div>
+
+        {/* DM toast when collapsed */}
+        {dmToast && !sidebar && (
+          <button
+            onClick={() => setSidebar(true)}
+            className="group absolute left-1/2 -translate-x-1/2 bottom-40 md:bottom-40 bg-black/55 hover:bg-black/65 active:bg-black/70 text-white border border-red-500/70 shadow-[0_0_14px_rgba(255,0,0,0.45)] ring-2 ring-red-500/60 rounded-full px-5 py-2 backdrop-blur-md flex items-center gap-3 animate-pulse z-30 transition cursor-pointer focus:outline-none focus:ring-4 focus:ring-red-500/40"
+            aria-label={`Open new DM from ${dmToast.user}`}
+          >
+            <span className="flex items-center justify-center h-7 w-7 rounded-full bg-red-500 text-[12px] font-extrabold leading-none tracking-tight shadow-inner shadow-red-900/40">
+              {Math.min(99, (unreadDm[dmToast.user]||0))}
+            </span>
+            <span className="text-sm font-semibold leading-none select-none">New DM from {dmToast.user}</span>
+          </button>
+        )}
 
         {/* Scroll-to-bottom FAB shown when scrolled up */}
         {!isAtBottom && (

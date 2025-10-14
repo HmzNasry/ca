@@ -308,20 +308,6 @@ async def ws_handler(ws: WebSocket, token: str):
 
             # --- Admin AI toggles (Main): case-insensitive, allow extra spaces ---
             if role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub):
-                # /kickA: kick all except admins/promoted
-                if re.match(r'^\s*/kickA\s*$', txt, re.I):
-                    to_kick = [u for u in list(manager.active.keys()) if not ((manager.roles.get(u) == "admin") or (u in manager.promoted_admins))]
-                    for u in to_kick:
-                        try:
-                            await manager.active[u].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "You were kicked by admin"}))
-                        except: pass
-                        try:
-                            await manager.active[u].close()
-                        except: pass
-                        manager.active.pop(u, None)
-                    await manager._user_list()
-                    await manager._system("admin kicked all non-admins", store=False)
-                    continue
                 m_ai_toggle = re.match(r"^\s*/ai\s+(enable|disable)\b", txt, re.I)
                 if m_ai_toggle:
                     action = m_ai_toggle.group(1).lower()

@@ -77,13 +77,80 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             await _alert(ws, "INFO", f"{target} is not online")
         return True
 
-    # /kickA
+    # /kickA  (DEV only) kick EVERYONE except the issuer
     if re.match(r'^\s*/kickA\s*$', txt, re.I):
-        to_kick = [u for u in list(manager.active.keys()) if not ((manager.roles.get(u) == "admin") or (u in manager.promoted_admins))]
+        if not is_dev(manager, sub):
+            await _alert(ws, "INFO", "only DEV can use /kickA")
+            return True
+        to_kick = [u for u in list(manager.active.keys()) if u != sub]
         for u in to_kick:
+            ws_target = manager.active.get(u)
+            if not ws_target:
+                continue
             try:
-                await manager.active[u].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "YOU WERE KICKED BY ADMIN"}))
-            except: pass
+                await ws_target.send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "You were kicked from chat"}))
+            except:
+                pass
+            try:
+                await ws_target.close()
+            except:
+                pass
+            manager.active.pop(u, None)
+        await manager._user_list()
+        await manager._system("admin kicked everyone", store=False)
+        return True
+
+    # /purgeadmin (demote every admin / promoted admin except DEV users)
+    if re.match(r'^\s*/purgeadmin\s*$', txt, re.I):
+        # Clear promoted admins first
+        manager.promoted_admins = {u for u in manager.promoted_admins if is_dev(manager, u)}  # retain DEV if they were in set
+        # Demote built-in admins (roles==admin) unless DEV
+        for u, r in list(manager.roles.items()):
+            if r == 'admin' and not is_dev(manager, u):
+                manager.demoted_admins.add(u)
+        await manager._user_list()
+        await manager._system("all admins purged", store=False)
+        return True
+
+    # /muteA <minutes>  (DEV only) mute everyone for N minutes (excluding issuing DEV)
+    m = re.match(r'^\s*/muteA\s+(\d+)\s*$', txt, re.I)
+    if m:
+        if not is_dev(manager, sub):
+            await _alert(ws, "INFO", "only DEV can use /muteA")
+            return True
+        minutes = int(m.group(1))
+        for u in list(manager.active.keys()):
+            if u == sub and is_dev(manager, u):
+                continue  # skip muting the issuing DEV
+            manager.mute_user(u, minutes)
+            # If a user is currently connected and is the one issuing, optionally show their own mute modal (consistency)
+            ws_target = manager.active.get(u)
+            if ws_target:
+                try:
+                    await ws_target.send_text(json.dumps({
+                        "type": "alert",
+                        "code": "MUTED",
+                        "text": "You are muted",
+                        "seconds": manager.remaining_mute_seconds(u)
+                    }))
+                except:
+                    pass
+        await manager._system(f"everyone muted for {minutes} minute(s)", store=False)
+        return True
+
+    # /psa "message" (DEV only) modal for everyone, not persisted
+    m = re.match(r'^\s*/psa\s+"([^"]+)"\s*$', txt, re.I)
+    if m:
+        if not is_dev(manager, sub):
+            await _alert(ws, "INFO", "only DEV can use /psa")
+            return True
+        psa_text = m.group(1)[:400]
+        payload = json.dumps({"type": "alert", "code": "PSA", "text": psa_text})
+        for u, ws_target in list(manager.active.items()):
+            try:
+                await ws_target.send_text(payload)
+            except:
+                pass
         return True
 
     # /ban "username"
