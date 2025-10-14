@@ -987,6 +987,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 }
                 const mine = m.sender === me;
                 const first = i === 0 || messages[i - 1].sender !== m.sender;
+                // Only show delete if it's my own message or I'm admin/dev
                 const canDelete = mine || isAdminEffective;
                 const mime = m.mime || "";
                 const isImage = mime.startswith ? mime.startswith("image") : mime.startsWith("image");
@@ -1134,7 +1135,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 }
                 const mine = m.sender === me;
                 const first = i === 0 || messages[i - 1].sender !== m.sender;
-                const canDelete = mine || isAdminEffective; // allow author or admin/dev to delete in Main
+                // Only show delete if it's my own message or I'm admin/dev (Main)
+                const canDelete = mine || isAdminEffective;
                 const mime = m.mime || "";
                 const isImage = typeof mime === "string" && mime.startsWith("image");
                 const isVideo = typeof mime === "string" && mime.startsWith("video");

@@ -289,6 +289,23 @@ async def ws_handler(ws: WebSocket, token: str):
                 await manager._system("admin cleared the chat", store=True)
                 continue
 
+            # Main: /delete <id> — allow author or admin/dev
+            m_del = re.match(r'^\s*/delete\s+(\S+)\s*$', txt, re.I)
+            if m_del and not (data.get("thread") == "dm"):
+                msg_id = m_del.group(1)
+                # find message in main history
+                target_msg = next((m for m in manager.history if m.get("id") == msg_id), None)
+                if not target_msg:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "message not found"}))
+                    continue
+                owner = target_msg.get("sender")
+                if owner != sub and not _is_effective_admin(manager, sub):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not allowed"}))
+                    continue
+                if manager.delete_main_message(msg_id):
+                    await manager._broadcast({"type": "delete", "id": msg_id, "thread": "main"})
+                continue
+
             # --- Admin AI toggles (Main): case-insensitive, allow extra spaces ---
             if role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub):
                 # /kickA: kick all except admins/promoted

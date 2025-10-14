@@ -1,5 +1,7 @@
 {
-  "users": [],
+  "users": [
+    "beast"
+  ],
   "ips": [],
   "user_ips": {}
 }
