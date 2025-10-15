@@ -327,13 +327,17 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         return;
       }
 
-      // Presence events (join/leave): notify and append as SYSTEM message in timeline
+      // Presence events (join/leave): only show in Main, not in DM
       if (d.type === "presence" && typeof d.user === "string" && typeof d.action === "string") {
+        if (activeDmRef.current !== null) {
+          // Suppress unrelated presence lines while viewing a DM
+          return;
+        }
         const user = String(d.user || ""); // keep original casing for names
         const actionRaw = String(d.action || "");
         const action = actionRaw.toLowerCase() === "join" ? "has joined chat" : actionRaw.toLowerCase() === "leave" ? "has left chat" : actionRaw;
         const text = `${user} ${action}`;
-        // Notify with title=user, body=message
+        // Notify with title=user, body=message (only on Main)
         notify(user, action);
         const sysMsg = {
           id: `presence-${Date.now()}-${Math.random()}`,
@@ -535,6 +539,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           notify("SYSTEM", cap);
           return setMessages([{ ...d, sender: "SYSTEM", text: cap }]);
         }
+        // Suppress general system lines while viewing a DM
+        if (activeDmRef.current !== null) {
+          return;
+        }
         notify("SYSTEM", cap);
         return setMessages(p => [...p, { ...d, text: cap }]);
       }
@@ -640,7 +648,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
     // Intercept admin-only commands for non-admins and show modal instead of sending
     if (!isAdminEffective) {
-      const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag|\/purgeadmin|\/muteA|\/psa)\b/i;
+  const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag|\/purgeadmin|\/muteA|\/unmuteA|\/psa)\b/i;
       // allow /clear in DM (scoped)
       if (/^\s*\/clear\s*$/i.test(txt) && activeDm) {
         // let it through
@@ -868,18 +876,34 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         audioCtxRef.current = ctx as AudioContext;
       }
       if (ctx && (ctx as any).state === "suspended") (ctx as any).resume();
-      const o = (ctx as any).createOscillator();
-      const g = (ctx as any).createGain();
-      o.type = "sine";
-      o.frequency.value = 880; // A5
-      o.connect(g);
-      g.connect((ctx as any).destination);
+
       const now = (ctx as any).currentTime;
-      g.gain.setValueAtTime(0.0001, now);
-      g.gain.exponentialRampToValueAtTime(0.08, now + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
-      o.start(now);
-      o.stop(now + 0.15);
+
+      // First tone (lower), slightly longer and louder
+      const o1 = (ctx as any).createOscillator();
+      const g1 = (ctx as any).createGain();
+      o1.type = "triangle";
+      o1.frequency.setValueAtTime(950, now);
+      o1.connect(g1);
+      g1.connect((ctx as any).destination);
+      g1.gain.setValueAtTime(0.0001, now);
+      g1.gain.exponentialRampToValueAtTime(0.16, now + 0.02);
+      g1.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+      o1.start(now);
+      o1.stop(now + 0.28);
+
+      // Second tone (higher) for a pleasant two-note ping
+      const o2 = (ctx as any).createOscillator();
+      const g2 = (ctx as any).createGain();
+      o2.type = "sine";
+      o2.frequency.setValueAtTime(1400, now + 0.16);
+      o2.connect(g2);
+      g2.connect((ctx as any).destination);
+      g2.gain.setValueAtTime(0.0001, now + 0.16);
+      g2.gain.exponentialRampToValueAtTime(0.12, now + 0.18);
+      g2.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+      o2.start(now + 0.16);
+      o2.stop(now + 0.36);
     } catch {}
   }, []);
 

@@ -168,8 +168,6 @@ async def ws_handler(ws: WebSocket, token: str):
                     items = manager.get_dm_history(sub, peer)
                     await ws.send_text(json.dumps({"type": "dm_history", "peer": peer, "items": items}))
                 continue
-
-            # --- DM thread: handle commands first (/delete, /clear), then normal DM send ---
             if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
                 peer = data.get("peer").strip()
                 if peer and peer != sub:
@@ -180,7 +178,7 @@ async def ws_handler(ws: WebSocket, token: str):
                             if await handle_tag_commands(manager, ws, sub, role, txt):
                                 continue
                         # admin/dev
-                        if (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                        if _is_effective_admin(manager, sub):
                             if await handle_admin_commands(manager, ws, sub, role, txt):
                                 continue
                             if await handle_moderation_commands(manager, ws, sub, role, txt):
@@ -229,7 +227,7 @@ async def ws_handler(ws: WebSocket, token: str):
                         continue
 
                     # Admin/dev commands are global: allow in DM as well
-                    if txt.startswith('/') and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                    if txt.startswith('/') and _is_effective_admin(manager, sub):
                         if await handle_admin_commands(manager, ws, sub, role, txt):
                             continue
                         if await handle_moderation_commands(manager, ws, sub, role, txt):
@@ -247,7 +245,7 @@ async def ws_handler(ws: WebSocket, token: str):
                             if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
                                 if await handle_tag_commands(manager, ws, sub, role, txt):
                                     handled = True
-                            if not handled and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                            if not handled and _is_effective_admin(manager, sub):
                                 if await handle_admin_commands(manager, ws, sub, role, txt):
                                     handled = True
                                 elif await handle_moderation_commands(manager, ws, sub, role, txt):
@@ -280,7 +278,7 @@ async def ws_handler(ws: WebSocket, token: str):
                 continue
 
             # Global /clear for Main (admin/dev only)
-            if txt == "/clear" and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)) and not (data.get("thread") == "dm"):
+            if txt == "/clear" and _is_effective_admin(manager, sub) and not (data.get("thread") == "dm"):
                 # Clear history first, then post a system line
                 try:
                     manager.history = []
@@ -307,7 +305,7 @@ async def ws_handler(ws: WebSocket, token: str):
                 continue
 
             # --- Admin AI toggles (Main): case-insensitive, allow extra spaces ---
-            if role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub):
+            if _is_effective_admin(manager, sub):
                 m_ai_toggle = re.match(r"^\s*/ai\s+(enable|disable)\b", txt, re.I)
                 if m_ai_toggle:
                     action = m_ai_toggle.group(1).lower()
@@ -336,7 +334,7 @@ async def ws_handler(ws: WebSocket, token: str):
                 if not prompt:
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "usage: @ai <prompt>"}))
                     continue
-                if not ai_enabled and not (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                if not ai_enabled and not _is_effective_admin(manager, sub):
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai is disabled by admin"}))
                     continue
                 if data.get("url"):
@@ -374,14 +372,14 @@ async def ws_handler(ws: WebSocket, token: str):
                 # If it's an unknown slash command, alert and do not broadcast (after command handlers above)
                 if txt.startswith('/'):
                     # Allow /clear for authorized users
-                    if txt.strip().lower() == '/clear' and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                    if txt.strip().lower() == '/clear' and _is_effective_admin(manager, sub):
                         continue
                     # Last-chance routing for commands in Main
                     handled = False
                     if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
                         if await handle_tag_commands(manager, ws, sub, role, txt):
                             handled = True
-                    if not handled and (role == "admin" or sub in manager.promoted_admins or _is_dev(manager, sub)):
+                    if not handled and _is_effective_admin(manager, sub):
                         if await handle_admin_commands(manager, ws, sub, role, txt):
                             handled = True
                         elif await handle_moderation_commands(manager, ws, sub, role, txt):

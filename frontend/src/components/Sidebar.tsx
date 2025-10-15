@@ -62,8 +62,8 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
             : (isMobile
                 ? 'right-0 translate-x-1/2' // mobile already slides; keep at edge
                 : 'right-0 translate-x-1/2') // desktop collapsed: keep at outer edge, not centered
-        } bg-[#0a0a0a] border border-white/15 text-[#e7dec3] text-[32px] leading-none font-bold rounded-full px-[9px] py-[6px] pb-[10px] flex items-center justify-center hover:scale-110 active:scale-95 transition-transform z-50 shadow-md pointer-events-auto`}
-        style={{ borderRadius: '9999px' }}
+        } bg-[#0a0a0a] border border-white/15 text-[#e7dec3] text-[30px] leading-[1] font-bold rounded-full px-2.5 py-2 flex items-center justify-center hover:scale-110 active:scale-95 transition-transform z-50 shadow-md pointer-events-auto`}
+        style={{ borderRadius: '9999px', minWidth: '36px', minHeight: '48px' }}
         aria-label={sidebar ? 'Collapse sidebar' : 'Expand sidebar'}
       >
         {sidebar ? '‹' : '›'}

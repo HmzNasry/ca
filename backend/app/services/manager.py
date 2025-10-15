@@ -160,6 +160,9 @@ class ConnMgr:
         self.active[user] = ws
         # set/refresh role for this session
         self.roles[user] = role or "user"
+        # If logging in as admin, it's a fresh session: clear any prior session demotion
+        if (role or "user") == "admin":
+            self.demoted_admins.discard(user)
         # record latest IP for the user (in-memory); persist only for banned users
         try:
             ip = ws.client.host

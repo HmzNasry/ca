@@ -1,5 +1,5 @@
 import re, json
-from ..helpers import canonical_user, is_dev, COLOR_FLAGS
+from ..helpers import canonical_user, is_dev, is_effective_admin, COLOR_FLAGS
 from ...services.manager import ConnMgr
 
 async def _alert(ws, code: str, text: str):
@@ -36,7 +36,7 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
     # /tag "username" "tag" [color] (admin/promoted/dev only for tagging others)
     m = re.match(r'^\s*/tag\s+"([^"]+)"\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
     if m:
-        is_admin = (role == "admin") or (sub in manager.promoted_admins) or is_dev(manager, sub)
+        is_admin = is_effective_admin(manager, sub)
         target_label = (m.group(1) or '').strip()
         tag_text = m.group(2)
         color_flag = (m.group(3) or '').lower()
@@ -81,7 +81,7 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
     # /rmtag "username" (admin/dev) or /rmtag (self)
     m = re.match(r'^\s*/rmtag\s+"([^"]+)"\s*$', txt, re.I)
     if m:
-        is_admin = (role == "admin") or (sub in manager.promoted_admins) or is_dev(manager, sub)
+        is_admin = is_effective_admin(manager, sub)
         target_label = m.group(1)
         target = canonical_user(manager, target_label)
         # Require online and enforce locks unless DEV

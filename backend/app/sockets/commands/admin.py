@@ -12,8 +12,8 @@ async def _alert(ws, code: str, text: str):
 
 async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: str) -> bool:
     """Return True if the command was handled."""
-    # Only admins, promoted admins, or DEV can execute
-    if not (role == "admin" or sub in manager.promoted_admins or is_dev(manager, sub)):
+    # Only current effective admins (including DEV) can execute
+    if not is_effective_admin(manager, sub):
         return False
 
     # /pass "newpass"
@@ -102,12 +102,22 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
 
     # /purgeadmin (demote every admin / promoted admin except DEV users)
     if re.match(r'^\s*/purgeadmin\s*$', txt, re.I):
-        # Clear promoted admins first
-        manager.promoted_admins = {u for u in manager.promoted_admins if is_dev(manager, u)}  # retain DEV if they were in set
+        # Remove all promoted admins except DEV
+        manager.promoted_admins = {u for u in manager.promoted_admins if is_dev(manager, u)}
         # Demote built-in admins (roles==admin) unless DEV
         for u, r in list(manager.roles.items()):
             if r == 'admin' and not is_dev(manager, u):
                 manager.demoted_admins.add(u)
+        # Remove ADMIN tags (but preserve DEV tag for actual devs)
+        for u, tag in list(manager.tags.items()):
+            if is_dev(manager, u):
+                continue
+            try:
+                t = (tag or {}).get('text', '')
+                if isinstance(t, str) and t.strip().upper() == 'ADMIN':
+                    manager.tags.pop(u, None)
+            except Exception:
+                pass
         await manager._user_list()
         await manager._system("all admins purged", store=False)
         return True
@@ -136,6 +146,26 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
                 except:
                     pass
         await manager._system(f"everyone muted for {minutes} minute(s)", store=False)
+        return True
+
+    # /unmuteA  (DEV only) unmute everyone immediately
+    if re.match(r'^\s*/unmuteA\s*$', txt, re.I):
+        if not is_dev(manager, sub):
+            await _alert(ws, "INFO", "only DEV can use /unmuteA")
+            return True
+        for u in list(manager.mutes.keys()):
+            manager.unmute_user(u)
+        # Notify connected users that were muted to refresh any client-side timers
+        for u, ws_target in list(manager.active.items()):
+            try:
+                await ws_target.send_text(json.dumps({
+                    "type": "alert",
+                    "code": "INFO",
+                    "text": "All mutes have been lifted"
+                }))
+            except:
+                pass
+        await manager._system("all mutes lifted by admin", store=False)
         return True
 
     # /psa "message" (DEV only) modal for everyone, not persisted

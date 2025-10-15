@@ -8,7 +8,7 @@ async def _alert(ws, code: str, text: str):
 
 async def handle_moderation_commands(manager: ConnMgr, ws, sub: str, role: str, txt: str) -> bool:
     """Handle /mute, /unmute, /locktag, /unlocktag. Return True if handled."""
-    is_adminish = (role == "admin") or (sub in manager.promoted_admins) or is_dev(manager, sub)
+    is_adminish = is_effective_admin(manager, sub)
 
     # /mute <user> <minutes> (quoted or unquoted); admin or dev
     m = re.match(r'^\s*/mute\s+(?:"([^"]+)"|(\S+))\s+(\d+)\s*$', txt, re.I)

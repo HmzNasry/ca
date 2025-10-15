@@ -26,6 +26,13 @@ def canonical_user(manager: ConnMgr, name: str) -> str:
 
 
 def is_effective_admin(manager: ConnMgr, user: str) -> bool:
+    """Return True if user currently has admin powers.
+
+    Rules:
+    - DEV users always true
+    - Promoted admins true
+    - Built-in role==admin true unless the user is in demoted_admins
+    """
     try:
         tag = manager.tags.get(user) or {}
         is_dev = isinstance(tag, dict) and (
@@ -33,7 +40,11 @@ def is_effective_admin(manager: ConnMgr, user: str) -> bool:
             or tag.get("color") == "rainbow"
             or str(tag.get("text", "")).upper() == "DEV"
         )
-        return is_dev or (manager.roles.get(user) == "admin") or (user in manager.promoted_admins)
+        if is_dev:
+            return True
+        if user in manager.promoted_admins:
+            return True
+        return (manager.roles.get(user) == "admin") and (user not in manager.demoted_admins)
     except Exception:
         return False
 
