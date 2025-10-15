@@ -9,11 +9,24 @@ async def _alert(ws, code: str, text: str):
 def _is_dev_user(manager: ConnMgr, user: str) -> bool:
     return is_dev(manager, user)
 
+MAX_TAG_LABEL_LEN = 30
+
+def _clamp_label(text: str) -> tuple[str, bool]:
+    """Clamp tag label to MAX_TAG_LABEL_LEN, appending ellipsis if truncated.
+    Returns (label, trimmed_bool)."""
+    s = (text or "").strip()
+    if len(s) <= MAX_TAG_LABEL_LEN:
+        return (s, False)
+    if MAX_TAG_LABEL_LEN <= 1:
+        return ("…"[:MAX_TAG_LABEL_LEN], True)
+    return (s[: MAX_TAG_LABEL_LEN - 1] + "…", True)
+
 async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: str) -> bool:
     # /tag myself "tag" [color]
     m = re.match(r'^\s*/tag\s+myself\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
     if m:
-        tag_text = m.group(1)
+        raw_tag_text = m.group(1)
+        tag_text, trimmed = _clamp_label(raw_tag_text)
         color_flag = (m.group(2) or '').lower()
         color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
         if tag_text.strip().lower() in {"dev", "admin"}:
@@ -26,10 +39,20 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         # If self is DEV, preserve DEV rainbow and append the personal tag
         if _is_dev_user(manager, sub):
             combined = f"DEV) ({tag_text}"
+            # Clamp entire display label for DEV
+            combined, trimmed_final = _clamp_label(combined)
             manager.tags[sub] = {"text": combined, "color": "rainbow", "special": "dev"}
         else:
             manager.tags[sub] = {"text": tag_text, "color": color}
         await manager._user_list()
+        # For DEV case, prefer final combined clamp state; otherwise use raw tag clamp state
+        to_report_trim = False
+        try:
+            to_report_trim = trimmed_final if _is_dev_user(manager, sub) else trimmed
+        except NameError:
+            to_report_trim = trimmed
+        if to_report_trim:
+            await _alert(ws, "INFO", f"Tag trimmed to {MAX_TAG_LABEL_LEN} chars")
         await manager._system(f"{sub} was tagged {tag_text}", store=False)
         return True
 
@@ -38,7 +61,8 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
     if m:
         is_admin = is_effective_admin(manager, sub)
         target_label = (m.group(1) or '').strip()
-        tag_text = m.group(2)
+        raw_tag_text = m.group(2)
+        tag_text, trimmed = _clamp_label(raw_tag_text)
         color_flag = (m.group(3) or '').lower()
         if not is_admin and target_label.lower() != "myself":
             await _alert(ws, "INFO", 'You can only tag yourself. Use: /tag "myself" "tag" [color]')
@@ -71,10 +95,17 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         if _is_dev_user(manager, target):
             # Preserve DEV and append the personal tag for self
             combined = f"DEV) ({tag_text}"
+            combined, trimmed_final = _clamp_label(combined)
             manager.tags[target] = {"text": combined, "color": "rainbow", "special": "dev"}
         else:
             manager.tags[target] = {"text": tag_text, "color": color}
         await manager._user_list()
+        try:
+            to_report_trim = trimmed_final if _is_dev_user(manager, target) else trimmed
+        except NameError:
+            to_report_trim = trimmed
+        if to_report_trim:
+            await _alert(ws, "INFO", f"Tag trimmed to {MAX_TAG_LABEL_LEN} chars")
         await manager._system(f"{target} was tagged {tag_text}", store=False)
         return True
 

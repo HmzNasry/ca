@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-import json, os
+import json, os, uuid
 from typing import Dict, List
 from fastapi import WebSocket
 
@@ -7,7 +7,34 @@ HISTORY = 100
 BAN_FILE = os.path.join(os.path.dirname(__file__), "..", "banned.json")
 BAN_FILE = os.path.abspath(BAN_FILE)
 
+# Server-side limits
+MAX_GC_NAME_LEN = 20
+
+def _clamp_with_ellipsis(text: str | None, max_len: int) -> str:
+    """Clamp text to max_len, appending a single-character ellipsis if truncated.
+    Ensures the resulting string length is at most max_len.
+    """
+    s = (text or "").strip()
+    if not s:
+        return s
+    if len(s) <= max_len:
+        return s
+    if max_len <= 1:
+        return "…"[:max_len]
+    return s[: max_len - 1] + "…"
+
 class ConnMgr:
+    def add_user_to_gc(self, gid: str, user: str):
+        gc = self.gcs.get(gid)
+        if not gc:
+            return
+        gc.setdefault("members", set()).add(user)
+
+    def remove_user_from_gc(self, gid: str, user: str):
+        gc = self.gcs.get(gid)
+        if not gc:
+            return
+        gc.setdefault("members", set()).discard(user)
     def __init__(self):
         self.active: Dict[str, WebSocket] = {}
         self.user_ips: Dict[str, str] = {}  # map username -> last seen IP (in-memory)
@@ -30,6 +57,9 @@ class ConnMgr:
         self.banned_users: set[str] = set()
         self.banned_ips: set[str] = set()
         self._load_bans()
+        # group chats (GCs) runtime store: id -> {name, creator, members:set[str], history:list[dict]}
+        self.gcs = {}
+        # No DB: start with empty history and groups
 
     # --- DM helpers ---
     def dm_id(self, a: str, b: str) -> str:
@@ -45,6 +75,7 @@ class ConnMgr:
         hist.append(obj)
         if len(hist) > HISTORY:
             self.dm_histories[tid] = hist[-HISTORY:]
+        # No DB: do nothing
 
     def update_dm_text(self, a: str, b: str, msg_id: str, text: str) -> bool:
         """Update text of a DM message in-place in the canonical stored history."""
@@ -55,6 +86,7 @@ class ConnMgr:
         for m in arr:
             if m.get("id") == msg_id:
                 m["text"] = text
+                # No DB: do nothing
                 return True
         return False
 
@@ -116,11 +148,170 @@ class ConnMgr:
         if not allow_any and requester and arr[idx].get("sender") != requester:
             return False
         arr.pop(idx)
+        # No DB: do nothing
         return True
 
     def clear_dm_history(self, a: str, b: str):
         tid = self.dm_id(a, b)
         self.dm_histories[tid] = []
+        # No DB: do nothing
+
+    # --- GC helpers ---
+    def create_gc(self, name: str, creator: str, members: List[str]) -> str:
+        """Create a group chat and return its id. Members should not include the creator; we'll add automatically."""
+        gid = f"gc-{int(datetime.utcnow().timestamp()*1000)}-{uuid.uuid4().hex[:6]}"
+        mems = set(members or [])
+        mems.add(creator)
+        self.gcs[gid] = {
+            "id": gid,
+            # Enforce max GC name length server-side
+            "name": _clamp_with_ellipsis(name or "Group Chat", MAX_GC_NAME_LEN),
+            "creator": creator,
+            "members": mems,
+            "history": [],
+        }
+        # No DB: do nothing
+        return gid
+
+    def user_in_gc(self, gid: str, user: str) -> bool:
+        gc = self.gcs.get(gid)
+        if not gc:
+            return False
+        return user in gc.get("members", set())
+
+    def get_gc_history(self, gid: str) -> List[dict]:
+        gc = self.gcs.get(gid)
+        if not gc:
+            return []
+        arr = gc.get("history", [])
+        return list(arr)
+
+    def clear_gc_history(self, gid: str):
+        if gid in self.gcs:
+            self.gcs[gid]["history"] = []
+        # No DB: do nothing
+
+    def update_gc_text(self, gid: str, msg_id: str, text: str) -> bool:
+        gc = self.gcs.get(gid)
+        if not gc:
+            return False
+        arr = gc.get("history", [])
+        for m in arr:
+            if m.get("id") == msg_id:
+                m["text"] = text
+                return True
+        return False
+
+    def delete_gc_message(self, gid: str, msg_id: str, requester: str | None = None, allow_creator: bool = True) -> bool:
+        gc = self.gcs.get(gid)
+        if not gc:
+            return False
+        arr = gc.get("history", [])
+        idx = next((i for i, m in enumerate(arr) if m.get("id") == msg_id), None)
+        if idx is None:
+            return False
+        if requester and not allow_creator:
+            if arr[idx].get("sender") != requester:
+                return False
+        if requester and allow_creator:
+            if arr[idx].get("sender") != requester and requester != gc.get("creator"):
+                return False
+        arr.pop(idx)
+        # No DB: do nothing
+        return True
+
+    async def _broadcast_gc(self, gid: str, obj: dict):
+        gc = self.gcs.get(gid)
+        if not gc:
+            return
+        base = dict(obj)
+        base.setdefault("thread", "gc")
+        base["gcid"] = gid
+        # Persist like main/dm: only user message/media
+        if base.get("type") in ("message", "media") and base.get("sender") != "SYSTEM":
+            gc["history"].append(base)
+            if len(gc["history"]) > HISTORY:
+                gc["history"] = gc["history"][-HISTORY:]
+        data = json.dumps(base)
+        gc = self.gcs.get(gid)
+        if not gc:
+            return
+        base = dict(obj)
+        base.setdefault("thread", "gc")
+        base["gcid"] = gid
+        data = json.dumps(base)
+        for user in list(gc.get("members", set())):
+            ws = self.active.get(user)
+            if not ws:
+                continue
+            try:
+                await ws.send_text(data)
+            except:
+                pass
+
+    async def _broadcast_gc_update(self, gid: str, obj: dict):
+        """Broadcast a GC update (typing, clear, delete, settings, etc.) without persisting.
+        Ensures gcid and thread fields are set and sends to all current members.
+        """
+        gc = self.gcs.get(gid)
+        if not gc:
+            return
+        base = dict(obj)
+        base.setdefault("thread", "gc")
+        base["gcid"] = gid
+        data = json.dumps(base)
+        for user in list(gc.get("members", set())):
+            ws = self.active.get(user)
+            if not ws:
+                continue
+            try:
+                await ws.send_text(data)
+            except:
+                pass
+
+    def get_user_gcs(self, user: str) -> List[dict]:
+        out: List[dict] = []
+        for gid, gc in self.gcs.items():
+            if user in gc.get("members", set()):
+                out.append({
+                    "id": gid,
+                    "name": gc.get("name"),
+                    "creator": gc.get("creator"),
+                    "members": list(gc.get("members", set())),
+                })
+        return out
+
+    def update_gc(self, gid: str, name: str | None = None, members: List[str] | None = None):
+        gc = self.gcs.get(gid)
+        if not gc:
+            return
+        if name is not None:
+            # Enforce max GC name length server-side
+            gc["name"] = _clamp_with_ellipsis(name, MAX_GC_NAME_LEN)
+        if members is not None:
+            # Always include creator in members
+            mset = set(members)
+            creator = gc.get("creator")
+            if creator:
+                mset.add(creator)
+            gc["members"] = mset
+        # No DB: do nothing
+
+    def exit_gc(self, gid: str, user: str):
+        gc = self.gcs.get(gid)
+        if not gc:
+            return
+        mems: set = gc.get("members", set())
+        if user in mems:
+            mems.remove(user)
+        # Transfer creator if necessary
+        if gc.get("creator") == user:
+            # Pick the next in remaining members (arbitrary)
+            new_creator = next(iter(mems), None)
+            gc["creator"] = new_creator
+        # If no members left, delete GC entirely
+        if not mems:
+            self.gcs.pop(gid, None)
 
     # --- presence (join/leave) ---
     async def _presence(self, user: str, action: str):
@@ -202,6 +393,18 @@ class ConnMgr:
         payload["tags"] = self.tags
         await self._broadcast(payload)
 
+    async def send_gc_list(self, users: List[str] | None = None):
+        targets = users or list(self.active.keys())
+        for u in targets:
+            ws = self.active.get(u)
+            if not ws:
+                continue
+            try:
+                payload = {"type": "gc_list", "gcs": self.get_user_gcs(u)}
+                await ws.send_text(json.dumps(payload))
+            except Exception:
+                pass
+
     async def _system(self, text: str, store: bool = True):
         # Capitalize first letter of system messages
         try:
@@ -223,11 +426,13 @@ class ConnMgr:
         await self._broadcast(msg)
 
     async def _broadcast(self, obj: dict):
-        # Persist only main thread user messages/media in history
-        if obj.get("type") in ("message", "media") and obj.get("sender") != "SYSTEM" and obj.get("thread", "main") == "main":
-            self.history.append(obj)
-            if len(self.history) > HISTORY:
-                self.history = self.history[-HISTORY:]
+        # Persist only real user messages/media in main; do NOT store system or presence here
+        if obj.get("type") in ("message", "media") and obj.get("sender") and obj.get("sender") != "SYSTEM":
+            # Treat missing thread as main for backward-compat
+            if obj.get("thread") in (None, "main"):
+                self.history.append(obj)
+                if len(self.history) > HISTORY:
+                    self.history = self.history[-HISTORY:]
         data = json.dumps(obj)
         for ws in list(self.active.values()):
             try:

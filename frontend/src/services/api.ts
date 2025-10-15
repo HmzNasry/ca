@@ -49,17 +49,20 @@ async function compressImage(file: File, { maxDim = 1920, quality = 0.82, mime =
   }
 }
 
-async function postForm(f: File, ctx?: { thread?: "main" | "dm"; peer?: string; user?: string }) {
+type UploadCtx = { thread?: "main" | "dm" | "gc"; peer?: string; user?: string; gcid?: string };
+
+async function postForm(f: File, ctx?: UploadCtx) {
   const fd = new FormData();
   fd.append("file", f, f.name || "upload" );
   if (ctx?.thread) fd.append("thread", ctx.thread);
   if (ctx?.peer) fd.append("peer", ctx.peer);
   if (ctx?.user) fd.append("user", ctx.user);
+  if (ctx?.gcid) fd.append("gcid", ctx.gcid);
   const r = await fetch("/upload", { method: "POST", body: fd });
   return r;
 }
 
-export async function uploadFile(f: File, ctx?: { thread?: "main" | "dm"; peer?: string; user?: string }) {
+export async function uploadFile(f: File, ctx?: UploadCtx) {
   let fileToSend = f;
   // Proactively compress very large images to reduce proxy rejections
   const big = f.type.startsWith("image/") && f.size > 6 * 1024 * 1024; // >6MB

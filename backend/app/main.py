@@ -3,9 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from .auth import login_user, Login, Token
 from .upload import router as upload_router, UPLOAD_DIR
+from .db import init_db
 from .websocket_handlers import ws_handler
 
 app = FastAPI()
+init_db()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

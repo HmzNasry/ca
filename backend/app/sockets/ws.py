@@ -28,6 +28,8 @@ from .commands.tags import handle_tag_commands
 
 manager = ConnMgr()
 manager.HISTORY = 100 if hasattr(manager, 'HISTORY') else None
+# Map usernames to last known IP
+manager.user_ips = {}  # username -> last known IP
 
 # --- AI controls/state ---
 ai_enabled = True
@@ -97,12 +99,14 @@ async def ws_handler(ws: WebSocket, token: str):
         return
 
     ip = ws.client.host
+    # Update last known IP for this username
+    manager.user_ips[sub] = ip
 
     # Reject duplicate usernames (already connected)
     try:
         if sub in manager.active:
             await ws.accept()
-            await ws.send_text(json.dumps({"type": "alert", "code": "DUPLICATE", "text": "USERNAME ALREADY ONLINE"}))
+            await ws.send_text(json.dumps({"type": "alert", "code": "DUPLICATE", "text": "Username already online"}))
             await ws.close()
             return
     except Exception:
@@ -111,12 +115,18 @@ async def ws_handler(ws: WebSocket, token: str):
     # check if banned (username or IP)
     if role != "admin" and (sub in manager.banned_users or ip in manager.banned_ips):
         await ws.accept()
-        await ws.send_text(json.dumps({"type": "alert", "code": "BANNED_CONNECT", "text": "YOU ARE BANNED FROM CHAT"}))
+        await ws.send_text(json.dumps({"type": "alert", "code": "BANNED_CONNECT", "text": "You are banned from chat"}))
         await ws.close()
         return
 
     await ws.accept()
     await manager.connect(ws, sub, role)
+    # Send current GC memberships to the user on connect
+    try:
+        gcs = manager.get_user_gcs(sub)
+        await ws.send_text(json.dumps({"type": "gc_list", "gcs": gcs}))
+    except Exception:
+        pass
     # Special DEV tag for localhost connections — also promote to admin for unrestricted permissions
     try:
         if ip in ("127.0.0.1", "::1", "localhost"):
@@ -132,12 +142,9 @@ async def ws_handler(ws: WebSocket, token: str):
         while True:
             data = await ws.receive_json()
             txt = (data.get("text", "") or "").strip()
-            # Normalize accidental leading './' to '/'
-            try:
-                if re.match(r'^\s*\./', txt):
-                    txt = re.sub(r'^(\s*)\./', r'\1/', txt)
-            except Exception:
-                pass
+            # Update last known IP for this username on every message
+            manager.user_ips[sub] = ws.client.host
+            # Do not normalize leading './' — keep user input exact
             now = datetime.utcnow()
 
             if data.get("typing"):
@@ -149,6 +156,10 @@ async def ws_handler(ws: WebSocket, token: str):
                         await manager._broadcast_dm_update(sub, peer, {
                             "type": "typing", "user": sub, "typing": data["typing"], "thread": "dm"
                         })
+                elif data.get("thread") == "gc" and isinstance(data.get("gcid"), str):
+                    gid = data.get("gcid").strip()
+                    if gid and manager.user_in_gc(gid, sub):
+                        await manager._broadcast_gc_update(gid, {"type": "typing", "user": sub, "typing": data["typing"], "thread": "gc"})
                 else:
                     # Main thread typing: suppress if muted
                     if manager.is_muted(sub):
@@ -168,9 +179,20 @@ async def ws_handler(ws: WebSocket, token: str):
                     items = manager.get_dm_history(sub, peer)
                     await ws.send_text(json.dumps({"type": "dm_history", "peer": peer, "items": items}))
                 continue
+            # --- GC: history request ---
+            if data.get("type") == "gc_history" and isinstance(data.get("gcid"), str):
+                gid = data.get("gcid").strip()
+                if gid and manager.user_in_gc(gid, sub):
+                    items = manager.get_gc_history(gid)
+                    await ws.send_text(json.dumps({"type": "gc_history", "gcid": gid, "items": items}))
+                continue
             if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
                 peer = data.get("peer").strip()
                 if peer and peer != sub:
+                    # Trigger Create-GC prompt from anywhere
+                    if re.match(r'^\s*/makegc\s*$', txt, re.I):
+                        await ws.send_text(json.dumps({"type": "gc_prompt"}))
+                        continue
                     # Route tag/admin/moderation commands globally even in DM
                     if txt.startswith('/'):
                         # allow tag commands for everyone
@@ -206,6 +228,10 @@ async def ws_handler(ws: WebSocket, token: str):
                         except Exception as e:
                             logger.warning("Failed to remove DM upload dir: %s", e)
                         await manager._broadcast_dm_update(sub, peer, {"type": "clear", "thread": "dm", "peer": peer})
+                        # Send system message to both DM users
+                        ts = datetime.utcnow().isoformat() + "Z"
+                        sysmsg = {"id": f"sys-{int(datetime.utcnow().timestamp()*1000)}", "type": "system", "sender": "SYSTEM", "timestamp": ts, "text": "DM cleared"}
+                        await manager._broadcast_dm(sub, peer, sysmsg)
                         continue
 
                     # Remove old DM-local mute commands; only support block/unblock DM
@@ -235,6 +261,71 @@ async def ws_handler(ws: WebSocket, token: str):
                         if await handle_tag_commands(manager, ws, sub, role, txt):
                             continue
 
+                    # --- AI in DM ---
+                    m_ai_dm = re.match(r"^\s*@ai\b(.*)$", txt, re.I)
+                    if m_ai_dm:
+                        if manager.is_dm_muted(peer, sub):
+                            await ws.send_text(json.dumps({"type": "alert", "code": "DM_BLOCKED", "text": "You are blocked from dm'ing this user"}))
+                            continue
+                        prompt = (m_ai_dm.group(1) or "").strip()
+                        if not prompt:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "usage: @ai <prompt>"}))
+                            continue
+                        img_url = data.get("image") if isinstance(data.get("image"), str) else None
+                        if img_url:
+                            mime_hint = str(data.get("image_mime") or "").lower()
+                            allowed_exts = (".png", ".jpg", ".jpeg", ".webp")
+                            is_ok = False
+                            if mime_hint:
+                                is_ok = (mime_hint.startswith("image/") and mime_hint != "image/gif")
+                            else:
+                                lower = img_url.lower()
+                                is_ok = lower.endswith(allowed_exts)
+                            if not is_ok:
+                                await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai only supports static images (png/jpg/webp)"}))
+                                continue
+                        model = "llava:7b" if img_url else TEXT_MODEL
+                        ai_id = f"AI-{int(datetime.utcnow().timestamp()*1000)}"
+                        ts0 = datetime.utcnow().isoformat() + "Z"
+                        echo_id = f"{sub}-{int(datetime.utcnow().timestamp()*1000)}"
+                        # Tagging and 'Generating Response' identical to Main/GC
+                        await manager._broadcast_dm(sub, peer, {"id": echo_id, "sender": sub, "timestamp": ts0, "type": "message", "text": txt, "thread": "dm", "peer": peer})
+                        if img_url:
+                            mid = f"{sub}-img-{int(datetime.utcnow().timestamp()*1000)}"
+                            mime = str(data.get("image_mime") or "image/jpeg")
+                            await manager._broadcast_dm(sub, peer, {"id": mid, "sender": sub, "timestamp": ts0, "type": "media", "url": img_url, "mime": mime, "thread": "dm", "peer": peer})
+                        await manager._broadcast_dm(sub, peer, {"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "", "model": model, "thread": "dm", "peer": peer})
+                        async def run_dm_ai():
+                            full_text = ""
+                            try:
+                                async for chunk in stream_ollama(prompt, image_url=img_url, history=manager.get_dm_history(sub, peer), invoker=sub):
+                                    full_text += chunk
+                                    try:
+                                        await manager._broadcast_dm_update(sub, peer, {"type": "update", "id": ai_id, "text": full_text, "thread": "dm", "peer": peer})
+                                    except Exception:
+                                        pass
+                            except asyncio.CancelledError:
+                                try:
+                                    await manager._broadcast_dm_update(sub, peer, {"type": "update", "id": ai_id, "text": "[STOPPED]", "thread": "dm", "peer": peer})
+                                    await manager._broadcast_dm(sub, peer, {"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "[STOPPED]", "model": model, "thread": "dm", "peer": peer})
+                                except Exception:
+                                    pass
+                                raise
+                            finally:
+                                try:
+                                    if not full_text.strip():
+                                        await manager._broadcast_dm_update(sub, peer, {"type": "update", "id": ai_id, "text": "[NO RESPONSE]", "thread": "dm", "peer": peer})
+                                        await manager._broadcast_dm(sub, peer, {"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "[NO RESPONSE]", "model": model, "thread": "dm", "peer": peer})
+                                    # Persist final text into DM history
+                                    dm_hist = manager.dm_histories.get(manager.dm_id(sub, peer), [])
+                                    for msg in dm_hist:
+                                        if msg.get("id") == ai_id:
+                                            msg["text"] = full_text if full_text.strip() else "[NO RESPONSE]"
+                                            break
+                                except Exception:
+                                    pass
+                        asyncio.create_task(run_dm_ai())
+                        continue
                     # Normal DM send
                     ts = now.isoformat() + "Z"
                     if data.get("text"):
@@ -277,6 +368,262 @@ async def ws_handler(ws: WebSocket, token: str):
                         await manager._broadcast_dm(sub, peer, msg)
                 continue
 
+            # --- GC thread handling ---
+            if data.get("thread") == "gc" and isinstance(data.get("gcid"), str):
+                # Detect join/leave events and broadcast system messages
+                if txt == "/join" and not manager.user_in_gc(gid, sub):
+                    manager.add_user_to_gc(gid, sub)
+                    ts = datetime.utcnow().isoformat() + "Z"
+                    sysmsg = {"id": f"sys-{int(datetime.utcnow().timestamp()*1000)}", "type": "system", "sender": "SYSTEM", "timestamp": ts, "text": f"{sub} joined the group"}
+                    await manager._broadcast_gc(gid, sysmsg)
+                    continue
+                if txt == "/leave" and manager.user_in_gc(gid, sub):
+                    manager.remove_user_from_gc(gid, sub)
+                    ts = datetime.utcnow().isoformat() + "Z"
+                    sysmsg = {"id": f"sys-{int(datetime.utcnow().timestamp()*1000)}", "type": "system", "sender": "SYSTEM", "timestamp": ts, "text": f"{sub} left the group"}
+                    await manager._broadcast_gc(gid, sysmsg)
+                    continue
+                gid = data.get("gcid").strip()
+                if not gid or not manager.user_in_gc(gid, sub):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not in this group chat"}))
+                    continue
+                # Commands in GC
+                if txt == "/clear":
+                    # Only GC creator can clear
+                    try:
+                        gc = manager.gcs.get(gid) or {}
+                        if gc.get("creator") != sub:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Only creator can clear this GC"}))
+                        else:
+                            manager.clear_gc_history(gid)
+                            # wipe GC uploads folder
+                            try:
+                                gc_dir = os.path.join(UPLOAD_DIR, "gc", gid)
+                                if os.path.isdir(gc_dir):
+                                    shutil.rmtree(gc_dir)
+                            except Exception as e:
+                                logger.warning("Failed to remove GC upload dir: %s", e)
+                            await manager._broadcast_gc_update(gid, {"type": "clear", "thread": "gc"})
+                            # Send system message to GC
+                            ts = datetime.utcnow().isoformat() + "Z"
+                            sysmsg = {"id": f"sys-{int(datetime.utcnow().timestamp()*1000)}", "type": "system", "sender": "SYSTEM", "timestamp": ts, "text": "Group cleared"}
+                            await manager._broadcast_gc(gid, sysmsg)
+                    except Exception:
+                        pass
+                    continue
+                # Delete a message in GC: allow author or creator
+                m_del_gc = re.match(r'^\s*/delete\s+(\S+)\s*$', txt, re.I)
+                if m_del_gc:
+                    msg_id = m_del_gc.group(1)
+                    ok = manager.delete_gc_message(gid, msg_id, requester=sub, allow_creator=True)
+                    if ok:
+                        await manager._broadcast_gc_update(gid, {"type": "delete", "id": msg_id, "thread": "gc"})
+                    continue
+                # Creation prompt
+                if re.match(r'^\s*/makegc\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "gc_prompt"}))
+                    continue
+                # --- AI in GC ---
+                m_ai_gc = re.match(r"^\s*@ai\b(.*)$", txt, re.I)
+                if m_ai_gc:
+                    if manager.is_muted(sub):
+                        await ws.send_text(json.dumps({
+                            "type": "alert",
+                            "code": "MUTED",
+                            "text": "You are muted",
+                            "seconds": manager.remaining_mute_seconds(sub)
+                        }))
+                        continue
+                    prompt = (m_ai_gc.group(1) or "").strip()
+                    if not prompt:
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "usage: @ai <prompt>"}))
+                        continue
+                    img_url = data.get("image") if isinstance(data.get("image"), str) else None
+                    if img_url:
+                        mime_hint = str(data.get("image_mime") or "").lower()
+                        allowed_exts = (".png", ".jpg", ".jpeg", ".webp")
+                        is_ok = False
+                        if mime_hint:
+                            is_ok = (mime_hint.startswith("image/") and mime_hint != "image/gif")
+                        else:
+                            lower = img_url.lower()
+                            is_ok = lower.endswith(allowed_exts)
+                        if not is_ok:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "@ai only supports static images (png/jpg/webp)"}))
+                            continue
+                    model = "llava:7b" if img_url else TEXT_MODEL
+                    ai_id = f"AI-{int(datetime.utcnow().timestamp()*1000)}"
+                    ts0 = datetime.utcnow().isoformat() + "Z"
+                    echo_id = f"{sub}-{int(datetime.utcnow().timestamp()*1000)}"
+                    # Tagging and 'Generating Response' identical to Main/DM
+                    await manager._broadcast_gc(gid, {"id": echo_id, "sender": sub, "timestamp": ts0, "type": "message", "text": txt, "thread": "gc", "gcid": gid})
+                    if img_url:
+                        mid = f"{sub}-img-{int(datetime.utcnow().timestamp()*1000)}"
+                        mime = str(data.get("image_mime") or "image/jpeg")
+                        await manager._broadcast_gc(gid, {"id": mid, "sender": sub, "timestamp": ts0, "type": "media", "url": img_url, "mime": mime, "thread": "gc", "gcid": gid})
+                    # Send 'Generating Response' system message
+                    await manager._broadcast_gc(gid, {"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "", "model": model, "thread": "gc", "gcid": gid})
+                    async def run_gc_ai():
+                        full_text = ""
+                        try:
+                            async for chunk in stream_ollama(prompt, image_url=img_url, history=manager.get_gc_history(gid), invoker=sub):
+                                full_text += chunk
+                                try:
+                                    await manager._broadcast_gc_update(gid, {"type": "update", "id": ai_id, "text": full_text, "thread": "gc", "gcid": gid})
+                                except Exception:
+                                    pass
+                        except asyncio.CancelledError:
+                            try:
+                                await manager._broadcast_gc_update(gid, {"type": "update", "id": ai_id, "text": "[STOPPED]", "thread": "gc", "gcid": gid})
+                                await manager._broadcast_gc(gid, {"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "[STOPPED]", "model": model, "thread": "gc", "gcid": gid})
+                            except Exception:
+                                pass
+                            raise
+                        finally:
+                            try:
+                                if not full_text.strip():
+                                    await manager._broadcast_gc_update(gid, {"type": "update", "id": ai_id, "text": "[NO RESPONSE]", "thread": "gc", "gcid": gid})
+                                    await manager._broadcast_gc(gid, {"id": ai_id, "sender": "AI", "timestamp": ts0, "type": "message", "text": "[NO RESPONSE]", "model": model, "thread": "gc", "gcid": gid})
+                                # Persist final text into GC history
+                                gc_hist = manager.gcs.get(gid, {}).get("history", [])
+                                for msg in gc_hist:
+                                    if msg.get("id") == ai_id:
+                                        msg["text"] = full_text if full_text.strip() else "[NO RESPONSE]"
+                                        break
+                            except Exception:
+                                pass
+                    asyncio.create_task(run_gc_ai())
+                    continue
+                # Normal GC send
+                ts = now.isoformat() + "Z"
+                if data.get("text"):
+                    if txt.startswith('/'):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Invalid command"}))
+                        continue
+                    if manager.is_muted(sub):
+                        await ws.send_text(json.dumps({
+                            "type": "alert",
+                            "code": "MUTED",
+                            "text": "You are muted",
+                            "seconds": manager.remaining_mute_seconds(sub)
+                        }))
+                        continue
+                    gc_text = str(data.get("text"))[:4000]
+                    mid = f"{sub}-{int(now.timestamp()*1000)}"
+                    msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": gc_text, "thread": "gc"}
+                    await manager._broadcast_gc(gid, msg)
+                elif data.get("url"):
+                    if manager.is_muted(sub):
+                        await ws.send_text(json.dumps({
+                            "type": "alert",
+                            "code": "MUTED",
+                            "text": "You are muted",
+                            "seconds": manager.remaining_mute_seconds(sub)
+                        }))
+                        continue
+                    url = str(data.get("url"))
+                    mime = str(data.get("mime") or "")
+                    mid = f"{sub}-{int(now.timestamp()*1000)}"
+                    msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "media", "url": url, "mime": mime, "thread": "gc"}
+                    await manager._broadcast_gc(gid, msg)
+                continue
+
+            # --- GC management commands (global) ---
+            # Create GC via payload after client collects input in a modal
+            if data.get("type") == "create_gc" and isinstance(data.get("name"), str) and isinstance(data.get("members"), list):
+                try:
+                    name = (data.get("name") or "").strip() or "Group Chat"
+                    members = [str(x) for x in data.get("members") if isinstance(x, str)]
+                    # sanitize: cannot include self twice
+                    members = [m for m in members if m != sub]
+                    gid = manager.create_gc(name, sub, members)
+                    await manager.send_gc_list([sub] + members)
+                    await ws.send_text(json.dumps({"type": "gc_created", "gcid": gid}))
+                except Exception as e:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "failed to create group"}))
+                continue
+
+            # Update GC (creator only): name and/or members list
+            if data.get("type") == "update_gc" and isinstance(data.get("gcid"), str):
+                gid = data.get("gcid").strip()
+                gc = manager.gcs.get(gid) or {}
+                if not gid or not gc:
+                    continue
+                if gc.get("creator") != sub:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "only creator can update"}))
+                    continue
+                name = data.get("name")
+                members = data.get("members")
+                if isinstance(members, list):
+                    members = [str(x) for x in members if isinstance(x, str)]
+                else:
+                    members = None
+                before = set((manager.gcs.get(gid) or {}).get("members", set()))
+                creator = (manager.gcs.get(gid) or {}).get("creator")
+                manager.update_gc(gid, name=name if isinstance(name, str) else None, members=members)
+                after = set((manager.gcs.get(gid) or {}).get("members", set()))
+                # Push updated lists to all impacted users (before ∪ after ∪ {creator})
+                try:
+                    affected = list(before.union(after).union({creator} if creator else set()))
+                    await manager.send_gc_list(affected)
+                except Exception:
+                    pass
+                await manager._broadcast_gc_update(gid, {"type": "gc_settings", "name": (name if isinstance(name, str) else gc.get("name"))})
+                continue
+
+            # Exit GC: if creator exits, ownership transfers inside manager
+            if data.get("type") == "exit_gc" and isinstance(data.get("gcid"), str):
+                gid = data.get("gcid").strip()
+                if gid and manager.user_in_gc(gid, sub):
+                    manager.exit_gc(gid, sub)
+                    # Notify members of change and update lists for leaver and remaining
+                    try:
+                        remaining = list((manager.gcs.get(gid) or {}).get("members", set()))
+                        await manager.send_gc_list([sub] + remaining)
+                        await manager._broadcast_gc_update(gid, {"type": "gc_member_left", "user": sub})
+                    except Exception:
+                        pass
+                continue
+
+            # Delete GC: creator only; remove GC and notify members to navigate away
+            if data.get("type") == "delete_gc" and isinstance(data.get("gcid"), str):
+                gid = data.get("gcid").strip()
+                gc = manager.gcs.get(gid) or {}
+                if gid and gc and gc.get("creator") == sub:
+                    # Delete uploads folder for this GC
+                    try:
+                        gc_dir = os.path.join(UPLOAD_DIR, "gc", gid)
+                        if os.path.isdir(gc_dir):
+                            shutil.rmtree(gc_dir)
+                    except Exception as e:
+                        logger.warning("Failed to remove GC upload dir: %s", e)
+                    # Capture members, remove
+                    members = list(gc.get("members", set()))
+                    manager.gcs.pop(gid, None)
+                    # Also delete from DB (group + its messages)
+                    try:
+                        from ..services.persistence import delete_group
+                        delete_group(gid)
+                    except Exception:
+                        pass
+                    # Notify members
+                    for u in members:
+                        try:
+                            w = manager.active.get(u)
+                            if w:
+                                await w.send_text(json.dumps({"type": "gc_deleted", "gcid": gid}))
+                        except Exception:
+                            pass
+                    await manager.send_gc_list(members)
+                else:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "only creator can delete"}))
+                continue
+
+            # Global: /makegc prompt when typed in Main or without thread
+            if re.match(r'^\s*/makegc\s*$', txt, re.I):
+                await ws.send_text(json.dumps({"type": "gc_prompt"}))
+                continue
+
             # Global /clear for Main (admin/dev only)
             if txt == "/clear" and _is_effective_admin(manager, sub) and not (data.get("thread") == "dm"):
                 # Clear history first, then post a system line
@@ -284,7 +631,24 @@ async def ws_handler(ws: WebSocket, token: str):
                     manager.history = []
                 except Exception:
                     manager.history = []
-                await manager._system("admin cleared the chat", store=True)
+                # Also wipe Main uploads folder
+                try:
+                    main_dir = os.path.join(UPLOAD_DIR, "main")
+                    if os.path.isdir(main_dir):
+                        shutil.rmtree(main_dir)
+                except Exception as e:
+                    logger.warning("Failed to remove Main upload dir: %s", e)
+                # Clear DB for main
+                try:
+                    from ..services.persistence import clear_history
+                    clear_history('main', None)
+                except Exception:
+                    pass
+                # Broadcast clear event and system message to all
+                await manager._broadcast({"type": "clear", "thread": "main"})
+                ts = datetime.utcnow().isoformat() + "Z"
+                sysmsg = {"id": f"sys-{int(datetime.utcnow().timestamp()*1000)}", "type": "system", "sender": "SYSTEM", "timestamp": ts, "text": "Admin cleared the chat"}
+                await manager._broadcast(sysmsg)
                 continue
 
             # Main: /delete <id> — allow author or admin/dev

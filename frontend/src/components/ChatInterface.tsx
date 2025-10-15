@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import TextareaAutosize from "react-textarea-autosize";
-import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown, Ban } from "lucide-react";
+import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown, Ban, LogOut } from "lucide-react";
 import EmojiConvertor from "emoji-js";
 import AlertModal from "@/components/AlertModal";
 
@@ -9,8 +9,19 @@ import * as api from "@/services/api";
 import Sidebar from "./Sidebar";
 import EmojiPanel from "./EmojiPanel";
 import AttachmentPreview from "./AttachmentPreview";
+import CreateGcModal from "./modals/CreateGcModal";
+import GcSettingsModal from "./modals/GcSettingsModal";
 
 export function ChatInterface({ token, onLogout }: { token: string; onLogout: () => void }) {
+  // Helper to fully log out and clear username
+  const fullLogout = useCallback(() => {
+    try {
+      localStorage.removeItem("chat-username");
+      localStorage.removeItem("chat-login-error");
+      document.cookie = "chat-username=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+    } catch {}
+    onLogout();
+  }, [onLogout]);
   const [me, setMe] = useState("");
   const [role, setRole] = useState("");
   const [users, setUsers] = useState<string[]>([]);
@@ -24,8 +35,13 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const [showPicker, setShowPicker] = useState(false);
   // DM/thread prep state
   const [activeDm, setActiveDm] = useState<string | null>(null); // null = Main Chat, otherwise username
+  // Group Chats (GC) state
+  type GC = { id: string; name: string; creator: string; members: string[] };
+  const [gcs, setGcs] = useState<GC[]>([]);
+  const [activeGc, setActiveGc] = useState<string | null>(null);
   const [unreadMain, setUnreadMain] = useState(0); // mention pings in Main when not viewing it
   const [unreadDm, setUnreadDm] = useState<Record<string, number>>({}); // future DM pings per user
+  const [unreadGc, setUnreadGc] = useState<Record<string, number>>({});
   const [blockedDm, setBlockedDm] = useState<Record<string, boolean>>({});
   // typing indicator state
   const [typingUser, setTypingUser] = useState("");
@@ -36,6 +52,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const [alertButton, setAlertButton] = useState<string | undefined>("OK");
   const alertActionRef = useRef<(() => void) | null>(null);
   const muteIntervalRef = useRef<number | null>(null);
+  const [makeGcOpen, setMakeGcOpen] = useState(false);
+  const [gcSettingsOpen, setGcSettingsOpen] = useState(false);
 
   const ws = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -45,6 +63,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   // track active thread in a ref for event handlers
   const activeDmRef = useRef<string | null>(null);
   useEffect(() => { activeDmRef.current = activeDm; }, [activeDm]);
+  const activeGcRef = useRef<string | null>(null);
+  useEffect(() => { activeGcRef.current = activeGc; }, [activeGc]);
   // Track ids received from initial history to avoid flashing old mentions
   const historyIdsRef = useRef<Set<string>>(new Set());
   // timers for typing indicator
@@ -120,7 +140,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     const meEsc = escapeRegex(me);
     // Match @me (word-bounded) or @"me" (quoted)
     const rePlain = new RegExp(`(^|\\s|[^\\w])@${meEsc}(?![\\w])`, "i");
-    const reQuoted = new RegExp(`@\"\s*${meEsc}\s*\"`, "i");
+    const reQuoted = new RegExp(`@"\\s*${meEsc}\\s*"`, "i");
     const everyone = /(^|\s|[^\w])@everyone(?![\w])/i.test(text) || /@"\s*everyone\s*"/i.test(text);
     return everyone || rePlain.test(text) || reQuoted.test(text);
   }, [me]);
@@ -250,6 +270,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   // Track users in a ref for case-preserving normalization
   const usersRef = useRef<string[]>([]);
   useEffect(() => { usersRef.current = users; }, [users]);
+  // Track latest GCs in a ref for invite detection inside ws.onmessage
+  const gcsRef = useRef<GC[]>([]);
+  useEffect(() => { gcsRef.current = gcs; }, [gcs]);
 
   // Auto-collapse sidebar on small screens and keep it in sync on resize
   useEffect(() => {
@@ -327,17 +350,118 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         return;
       }
 
-      // Presence events (join/leave): only show in Main, not in DM
+      // Group chat lists
+      if (d.type === "gc_list" && Array.isArray(d.gcs)) {
+        // Detect new GCs and schedule an invite toast when sidebar is collapsed
+        try {
+          const incoming = d.gcs as GC[];
+          const prevIds = new Set(gcsRef.current.map(g => g.id));
+          const newOnes = incoming.filter(g => !prevIds.has(g.id));
+          if (newOnes.length > 0) {
+            const newest = newOnes[newOnes.length - 1];
+            scheduleGcInviteToast(newest.id, newest.name || 'Group');
+          }
+          // If currently viewing a GC that is no longer in the list (left or deleted), exit it
+          const active = activeGcRef.current;
+          if (active && !incoming.some(g => g.id === active)) {
+            setActiveGc(null);
+            setActiveDm(null);
+            try { ws.current?.send(JSON.stringify({ type: 'history_request' })); } catch {}
+          }
+        } catch {}
+        setGcs(d.gcs as GC[]);
+        return;
+      }
+      if (d.type === "gc_prompt") {
+        setMakeGcOpen(true);
+        return;
+      }
+
+      // GC history
+      if (d.type === "gc_history" && Array.isArray(d.items)) {
+        seen.current.clear();
+        d.items.forEach((x: any) => x?.id && seen.current.add(x.id));
+        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && x.id).filter(Boolean));
+        forceScrollRef.current = true; // scroll to latest
+        return setMessages(d.items);
+      }
+
+      if (d.type === "gc_created" && typeof d.gcid === 'string') {
+        // Switch to the newly created GC
+        setActiveDm(null);
+        setActiveGc(d.gcid);
+        try { ws.current?.send(JSON.stringify({ type: 'gc_history', gcid: d.gcid })); } catch {}
+        return;
+      }
+
+      if (d.type === 'gc_settings' && typeof d.gcid === 'string') {
+        // Update GC name locally
+        setGcs(prev => prev.map(gc => gc.id === d.gcid ? { ...gc, name: (typeof d.name === 'string' ? d.name : gc.name) } : gc));
+        return;
+      }
+
+      if (d.type === "gc_deleted" && typeof d.gcid === 'string') {
+        if (activeGcRef.current === d.gcid) {
+          setActiveGc(null);
+          setActiveDm(null);
+          try { ws.current?.send(JSON.stringify({ type: 'history_request' })); } catch {}
+        }
+        setGcs(prev => prev.filter(gc => gc.id !== d.gcid));
+        return;
+      }
+
+      // Presence events (join/leave): show in correct GC, not in main thread
+      if (d.type === "gc_member_joined" && typeof d.user === "string" && typeof d.gcid === "string") {
+        const gc = gcsRef.current.find(g => g.id === d.gcid);
+        if (gc) {
+          const user = String(d.user || "");
+          const text = `${user} has joined the group`;
+          if (activeGcRef.current === d.gcid) {
+            const sysMsg = {
+              id: `gc-presence-join-${Date.now()}-${Math.random()}`,
+              type: "system",
+              sender: "SYSTEM",
+              text,
+              timestamp: new Date().toISOString(),
+            } as any;
+            setMessages(prev => [...prev, sysMsg]);
+          }
+          if (user !== me) {
+            notify(`New member in ${gc.name}`, text);
+          }
+        }
+        return;
+      }
+      if (d.type === "gc_member_left" && typeof d.user === "string" && typeof d.gcid === "string") {
+        const gc = gcsRef.current.find(g => g.id === d.gcid);
+        if (gc) {
+          const user = String(d.user || "");
+          const text = `${user} has left the group`;
+          if (activeGcRef.current === d.gcid) {
+            const sysMsg = {
+              id: `gc-presence-leave-${Date.now()}-${Math.random()}`,
+              type: "system",
+              sender: "SYSTEM",
+              text,
+              timestamp: new Date().toISOString(),
+            } as any;
+            setMessages(prev => [...prev, sysMsg]);
+          }
+          if (user !== me) {
+            notify(`Member left ${gc.name}`, text);
+          }
+        }
+        return;
+      }
+      // Main thread presence (join/leave) only if not in DM or GC
       if (d.type === "presence" && typeof d.user === "string" && typeof d.action === "string") {
-        if (activeDmRef.current !== null) {
-          // Suppress unrelated presence lines while viewing a DM
+        if (activeDmRef.current !== null || activeGcRef.current) {
           return;
         }
-        const user = String(d.user || ""); // keep original casing for names
+        const user = String(d.user || "");
         const actionRaw = String(d.action || "");
         const action = actionRaw.toLowerCase() === "join" ? "has joined chat" : actionRaw.toLowerCase() === "leave" ? "has left chat" : actionRaw;
         const text = `${user} ${action}`;
-        // Notify with title=user, body=message (only on Main)
         notify(user, action);
         const sysMsg = {
           id: `presence-${Date.now()}-${Math.random()}`,
@@ -350,10 +474,14 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         return;
       }
 
-      // Handle delete events (main and DM)
+      // Handle delete events (main, DM, GC)
       if (d.type === "delete" && d.id) {
         if (d.thread === "dm") {
           if (activeDmRef.current === d.peer) {
+            setMessages(prev => prev.filter(m => m.id !== d.id));
+          }
+        } else if (d.thread === 'gc') {
+          if (activeGcRef.current === d.gcid) {
             setMessages(prev => prev.filter(m => m.id !== d.id));
           }
         } else {
@@ -364,25 +492,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         return;
       }
 
-      // Handle clear events (main and DM)
+      // Handle clear events (main, DM, GC)
       if (d.type === "clear") {
-        if (d.thread === "dm") {
-          // For DM, keep a small inline system line
-          if (activeDmRef.current === d.peer) {
-            const sys = {
-              id: `clear-${Date.now()}-${Math.random()}`,
-              type: "system",
-              sender: "SYSTEM",
-              text: "dm cleared",
-              timestamp: new Date().toISOString(),
-            } as any;
-            setMessages([sys]);
-          }
-        } else {
-          // For Main, just clear timeline and wait for server 'system' message
-          if (activeDmRef.current === null) {
-            setMessages([]);
-          }
+        // For DM/GC/Main, just clear timeline and wait for server 'system' message
+        if (d.thread === "dm" && activeDmRef.current === d.peer) {
+          setMessages([]);
+        } else if (d.thread === 'gc' && activeGcRef.current === d.gcid) {
+          setMessages([]);
+        } else if ((d.thread === "main" || !d.thread) && activeDmRef.current === null && !activeGcRef.current) {
+          setMessages([]);
         }
         return;
       }
@@ -403,8 +521,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         return setMessages(d.items);
       }
 
-      // Throttled AI streaming updates
+      // Throttled AI streaming updates — apply only for the active thread
       if (d.type === "update" && d.id) {
+        // Gate by thread
+        const isGC = d.thread === 'gc' && typeof d.gcid === 'string';
+        const isDM = d.thread === 'dm' && typeof d.peer === 'string';
+        const isMain = !d.thread || d.thread === 'main';
+        if (isGC && activeGcRef.current !== d.gcid) return;
+        if (isDM && activeDmRef.current !== d.peer) return;
+        if (isMain && (activeDmRef.current !== null || !!activeGcRef.current)) return;
         aiPendingRef.current[d.id] = d.text ?? "";
         if (!aiUpdateTimer.current) {
           aiUpdateTimer.current = window.setTimeout(() => {
@@ -419,43 +544,64 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       // AI streaming via repeated 'message' events with the same id: append chunks
       if (d.type === "message" && d.sender === "AI" && d.id) {
-        // Respect DM routing and notify when off-thread or tab hidden
         const isHidden = typeof document !== "undefined" && document.hidden;
-        if (d.thread === "dm") {
-          if (activeDmRef.current !== d.peer) {
-            setUnreadDm(prev => ({ ...prev, [d.peer as string]: (prev[d.peer as string] || 0) + 1 }));
-            const title = `AI replied in DM with ${d.peer}`;
-            const body = typeof d.text === "string" && d.text ? d.text : "AI is responding";
-            notify(title, body);
-            return;
-          } else if (isHidden) {
-            const title = `AI replied in DM with ${d.peer}`;
-            const body = typeof d.text === "string" && d.text ? d.text : "AI is responding";
-            notify(title, body);
+        // Thread context detection
+        const isGC = d.thread === "gc" && typeof d.gcid === "string";
+        const isDM = d.thread === "dm" && typeof d.peer === "string";
+        const isMain = !d.thread || d.thread === "main";
+
+        // Only notify for actual AI responses (not prompts), and only if not viewing the relevant thread or tab is hidden
+        let shouldNotify = false;
+        let notifyTitle = "AI";
+        let notifyBody = typeof d.text === "string" && d.text ? d.text : "AI is responding";
+        // Only notify if there is actual AI response text (not just spinner)
+        const hasResponse = typeof d.text === "string" && d.text.trim().length > 0;
+        // Only notify for AI responses, not prompts (AI prompt messages have empty text)
+        if (hasResponse) {
+          if (isGC) {
+            if (activeGcRef.current !== d.gcid) {
+              shouldNotify = true;
+              notifyTitle = `AI replied in GC: ${gcsRef.current.find(x=>x.id===d.gcid)?.name || 'Group'}`;
+            } else if (isHidden) {
+              shouldNotify = true;
+              notifyTitle = `AI replied in GC: ${gcsRef.current.find(x=>x.id===d.gcid)?.name || 'Group'}`;
+            }
+          } else if (isDM) {
+            if (activeDmRef.current !== d.peer) {
+              shouldNotify = true;
+              notifyTitle = `AI replied in DM with ${d.peer}`;
+            } else if (isHidden) {
+              shouldNotify = true;
+              notifyTitle = `AI replied in DM with ${d.peer}`;
+            }
+          } else if (isMain) {
+            if (activeDmRef.current !== null || activeGcRef.current) {
+              shouldNotify = true;
+              notifyTitle = `AI replied in Main Chat`;
+            } else if (isHidden) {
+              shouldNotify = true;
+              notifyTitle = `AI replied in Main Chat`;
+            }
           }
-        } else if (activeDmRef.current !== null) {
-          // If viewing a DM, ignore main AI chunks
-          const title = `AI (Main)`;
-          const body = typeof d.text === "string" && d.text ? d.text : "AI is responding";
-          notify(title, body);
-          return;
-        } else if (isHidden) {
-          const title = `AI (Main)`;
-          const body = typeof d.text === "string" && d.text ? d.text : "AI is responding";
-          notify(title, body);
+        }
+        if (shouldNotify) {
+          notify(notifyTitle, notifyBody);
         }
 
-        setMessages(prev => {
-          const idx = prev.findIndex(m => m.id === d.id);
-          if (idx !== -1) {
-            const copy = [...prev];
-            const old = copy[idx];
-            copy[idx] = { ...old, text: (old.text || "") + (d.text || "") };
-            return copy;
-          }
-          // First packet for this AI id. If text is empty, it will show spinner
-          return [...prev, d];
-        });
+        // Only render spinner and AI responses in the correct thread
+        if ((isGC && activeGcRef.current === d.gcid) || (isDM && activeDmRef.current === d.peer) || (isMain && activeDmRef.current === null && !activeGcRef.current)) {
+          setMessages(prev => {
+            const idx = prev.findIndex(m => m.id === d.id);
+            if (idx !== -1) {
+              const copy = [...prev];
+              const old = copy[idx];
+              copy[idx] = { ...old, text: (old.text || "") + (d.text || "") };
+              return copy;
+            }
+            // First packet for this AI id. If text is empty, it will show spinner
+            return [...prev, d];
+          });
+        }
         return;
       }
 
@@ -464,8 +610,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         // Only show typing for the active thread
         if (d.thread === "dm") {
           if (activeDmRef.current !== d.peer) return;
+        } else if (d.thread === 'gc') {
+          if (activeGcRef.current !== d.gcid) return;
         } else {
-          if (activeDmRef.current !== null) return;
+          // main typing only when not in DM or GC
+          if (activeDmRef.current !== null || activeGcRef.current) return;
         }
         if (d.typing) {
           setTypingUser(d.user || "");
@@ -490,7 +639,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         typingHideTimer.current = window.setTimeout(() => setTypingUser(""), 120);
       }
 
-      // Route DM events and update unread counters + toast when sidebar collapsed
+  // Route DM/GC events and update unread counters + toast when sidebar collapsed
       if ((d.type === "message" || d.type === "media") && d.thread === "dm" && typeof d.peer === "string") {
         const isHidden = typeof document !== "undefined" && document.hidden;
         // If not on that DM thread, raise unread and do not render here
@@ -507,21 +656,42 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           notify(title, body);
         }
       }
+      if ((d.type === 'message' || d.type === 'media') && d.thread === 'gc' && typeof d.gcid === 'string') {
+        const isHidden = typeof document !== "undefined" && document.hidden;
+        if (activeGcRef.current !== d.gcid) {
+          const title = `${d.sender} in ${gcsRef.current.find(x=>x.id===d.gcid)?.name || 'Group'}`;
+          const body = typeof d.text === 'string' && d.text ? d.text : (d.mime || 'media');
+          notify(title, body);
+          setUnreadGc(prev => ({ ...prev, [d.gcid]: (prev[d.gcid] || 0) + 1 }));
+          if (typeof d.text === 'string' && d.sender !== me && mentionsMe(d.text || '')) {
+            const label = gcsRef.current.find(x=>x.id===d.gcid)?.name || 'Group';
+            scheduleMentionToast('gc', label, d.gcid);
+          }
+          return;
+        } else if (isHidden) {
+          const title = `${d.sender} in ${gcsRef.current.find(x=>x.id===d.gcid)?.name || 'Group'}`;
+          const body = typeof d.text === 'string' && d.text ? d.text : (d.mime || 'media');
+          notify(title, body);
+        }
+        if (!seen.current.has(d.id)) setMessages(prev => [...prev, d]);
+        return;
+      }
 
       // Main thread notifications / unread when off main OR mention OR tab hidden
       if ((d.type === "message" || d.type === "media") && (!d.thread || d.thread === "main") && d.sender) {
         const isHidden = typeof document !== "undefined" && document.hidden;
-        const notOnMain = activeDmRef.current !== null; // user is in a DM
+        const notOnMain = activeDmRef.current !== null || !!activeGcRef.current; // user is in DM or GC
         const isMention = typeof d.text === "string" && d.sender !== me && mentionsMe(d.text || "");
         // Increment unread counter only for mentions when off main or hidden
         if ((notOnMain || isHidden) && isMention) setUnreadMain(c => c + 1);
+        if (notOnMain && isMention) scheduleMentionToast('main', 'Main Chat');
         // Notify if off main (any message not from me) OR hidden and mention
         if ((notOnMain && d.sender !== me) || (isHidden && (isMention || d.sender !== me))) {
           const title = `${d.sender} (Main)`;
           const body = typeof d.text === "string" && d.text ? d.text : (d.mime || "media");
           notify(title, body);
         }
-        if (activeDmRef.current !== null) return; // don't render main messages while viewing DM
+        if (activeDmRef.current !== null || activeGcRef.current) return; // don't render main while viewing DM or GC
       }
 
       if (d.type === "user_list") {
@@ -534,22 +704,29 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       // System events notifications and handle clear wording
       if (d.type === "system") {
         const txt = String(d.text || "");
-        const cap = txt ? txt[0].toUpperCase() + txt.slice(1) : txt;
+        // No frontend capitalization, use backend casing as-is
         if (activeDmRef.current === null && /cleared the chat/i.test(txt)) {
-          notify("SYSTEM", cap);
-          return setMessages([{ ...d, sender: "SYSTEM", text: cap }]);
+          notify("SYSTEM", txt);
+          return setMessages([{ ...d, sender: "SYSTEM", text: txt }]);
         }
-        // Suppress general system lines while viewing a DM
-        if (activeDmRef.current !== null) {
+        // Suppress general system lines while viewing a DM or GC (main-only)
+        if (activeDmRef.current !== null || activeGcRef.current) {
           return;
         }
-        notify("SYSTEM", cap);
-        return setMessages(p => [...p, { ...d, text: cap }]);
+        notify("SYSTEM", txt);
+        return setMessages(p => [...p, { ...d, text: txt }]);
       }
 
+      // Final fallback: only append to the currently active thread timeline
       if (d.id && seen.current.has(d.id)) return;
-      if (d.id) seen.current.add(d.id);
-      setMessages(p => [...p, d]);
+      const isMain = !activeDmRef.current && !activeGcRef.current;
+      const okForMain = (!d.thread || d.thread === 'main') && isMain;
+      const okForDm = (d.thread === 'dm' && d.peer === activeDmRef.current);
+      const okForGc = (d.thread === 'gc' && d.gcid === activeGcRef.current);
+      if (okForMain || okForDm || okForGc) {
+        if (d.id) seen.current.add(d.id);
+        setMessages(p => [...p, d]);
+      }
     };
 
     return () => {
@@ -562,16 +739,20 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   }, [token]);
 
   // Reset unread counts and request history when switching threads
+  // Always request correct history when switching threads
   useEffect(() => {
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
-    if (activeDm === null) {
-      try { ws.current.send(JSON.stringify({ type: "history_request" })); } catch {}
-      setUnreadMain(0);
-    } else {
+    if (activeGc) {
+      try { ws.current.send(JSON.stringify({ type: "gc_history", gcid: activeGc })); } catch {}
+      setUnreadGc(prev => ({ ...prev, [activeGc]: 0 }));
+    } else if (activeDm) {
       try { ws.current.send(JSON.stringify({ type: "dm_history", peer: activeDm })); } catch {}
       setUnreadDm(prev => ({ ...prev, [activeDm]: 0 }));
+    } else {
+      try { ws.current.send(JSON.stringify({ type: "history_request" })); } catch {}
+      setUnreadMain(0);
     }
-  }, [activeDm]);
+  }, [activeDm, activeGc]);
 
   // Auto-scroll on new messages only if at bottom or when explicitly forced (e.g., after loading history)
   useEffect(() => {
@@ -601,7 +782,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const pingTyping = useCallback((val: string) => {
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
     if (!val || !val.trim()) return;
-    const threadPayload = activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : { thread: "main" } as any;
+    const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : { thread: "main" } as any);
     try { ws.current.send(JSON.stringify({ typing: true, ...threadPayload })); } catch {}
   }, []);
 
@@ -645,6 +826,13 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     if (sending) return;
     let txt = input.trim();
     if (!txt && files.length === 0) return;
+
+    // Client-side shortcut: open Create GC modal on /makegc
+    if (/^\s*\/makegc\s*$/i.test(txt)) {
+      setMakeGcOpen(true);
+      setInput("");
+      return;
+    }
 
     // Intercept admin-only commands for non-admins and show modal instead of sending
     if (!isAdminEffective) {
@@ -735,7 +923,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     }
 
     // @ai mention triggers AI (anywhere in message)
-    if (isAiAnywhere(txt)) {
+  if (isAiAnywhere(txt)) {
       const promptOnly = extractAiPrompt(txt);
       if (!promptOnly) {
         showAlert("Usage: @ai <prompt>");
@@ -743,11 +931,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       }
 
       try {
-        const threadPayload = activeDm ? { thread: "dm", peer: activeDm } : {};
+  const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {});
         // If an image is attached, upload it and include as `image` for llava
         const imgFile = files.find(f => f.type && f.type.startsWith("image"));
         if (imgFile) {
-          const up = await api.uploadFile(imgFile, activeDm ? { thread: "dm", peer: activeDm, user: me } : { thread: "main", user: me });
+          const up = await api.uploadFile(imgFile, activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current, user: me } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current, user: me } : { thread: "main", user: me }));
           if (!up?.url) throw new Error("upload failed");
           ws.current?.send(JSON.stringify({ text: input, image: up.url, image_mime: up.mime, ...threadPayload }));
         } else {
@@ -766,9 +954,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       return;
     }
 
-    // Normal send flow (supports Main and DM)
+  // Normal send flow (supports Main, DM, and GC)
     setSending(true);
-    const threadPayload = activeDm ? { thread: "dm", peer: activeDm } : {};
+  const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {});
     try {
       if (txt && files.length > 0) {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -777,7 +965,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           throw new Error("socket not connected");
         }
         for (const f of files) {
-          const up = await api.uploadFile(f, activeDm ? { thread: "dm", peer: activeDm, user: me } : { thread: "main", user: me });
+          const up = await api.uploadFile(f, activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current, user: me } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current, user: me } : { thread: "main", user: me }));
           if (!up?.url) throw new Error("upload failed");
           ws.current?.send(JSON.stringify({ url: up.url, mime: up.mime, ...threadPayload }));
         }
@@ -789,7 +977,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         }
       } else {
         for (const f of files) {
-          const up = await api.uploadFile(f, activeDm ? { thread: "dm", peer: activeDm, user: me } : { thread: "main", user: me });
+          const up = await api.uploadFile(f, activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current, user: me } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current, user: me } : { thread: "main", user: me }));
           if (!up?.url) throw new Error("upload failed");
           ws.current?.send(JSON.stringify({ url: up.url, mime: up.mime, ...threadPayload }));
         }
@@ -807,8 +995,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   };
 
   const deleteMsg = (id: string) => {
-    const threadPayload = activeDm ? { thread: "dm", peer: activeDm } : {} as any;
+  const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {} as any);
     ws.current?.send(JSON.stringify({ text: `/delete ${id}`, ...threadPayload }));
+  };
+
+  const createGc = (name: string, members: string[]) => {
+    try { ws.current?.send(JSON.stringify({ type: 'create_gc', name, members })); } catch {}
   };
 
   // Helpers for URL previews
@@ -925,6 +1117,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   // Track last DM toast visibility
   const [dmToast, setDmToast] = useState<{ user: string; id: number } | null>(null);
+  const [mentionToast, setMentionToast] = useState<{ where: 'main' | 'gc'; label: string; gcid?: string; id: number } | null>(null);
+  const [gcInviteToast, setGcInviteToast] = useState<{ gcid: string; label: string; id: number } | null>(null);
   const sidebarRef = useRef(true);
   useEffect(() => { sidebarRef.current = sidebar; }, [sidebar]);
   const scheduleDmToast = useCallback((user: string) => {
@@ -932,6 +1126,20 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     setDmToast({ user, id: Date.now() });
     window.setTimeout(() => {
       setDmToast(t => (t && Date.now() - t.id >= 4800 ? null : t));
+    }, 5000);
+  }, []);
+  const scheduleMentionToast = useCallback((where: 'main' | 'gc', label: string, gcid?: string) => {
+    if (sidebarRef.current) return; // keep consistent with DM toast behavior
+    setMentionToast({ where, label, gcid, id: Date.now() });
+    window.setTimeout(() => {
+      setMentionToast(t => (t && Date.now() - t.id >= 4800 ? null : t));
+    }, 5000);
+  }, []);
+  const scheduleGcInviteToast = useCallback((gcid: string, label: string) => {
+    if (sidebarRef.current) return;
+    setGcInviteToast({ gcid, label, id: Date.now() });
+    window.setTimeout(() => {
+      setGcInviteToast(t => (t && Date.now() - t.id >= 4800 ? null : t));
     }, 5000);
   }, []);
 
@@ -972,7 +1180,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       {isMobile && sidebar && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-30" onClick={()=>setSidebar(false)} />
       )}
-  <div className={isMobile ? 'fixed inset-y-0 left-0 z-40' : `relative z-20 h-full transition-all duration-300 ${sidebar ? 'w-64' : 'w-12'}`}>
+  <div className={isMobile ? `fixed inset-y-0 left-0 z-40 ${!sidebar && 'pointer-events-none'}` : `relative z-20 h-full transition-all duration-300 ${sidebar ? 'w-64' : 'w-12'}`}>
         <Sidebar
           users={users}
           me={me}
@@ -981,11 +1189,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           unreadMain={unreadMain}
           sidebar={sidebar}
           setSidebar={setSidebar}
-          onSelectDm={(u) => { setActiveDm(u); if (isMobile) setSidebar(false); }}
-          onLogout={onLogout}
+          onSelectDm={(u) => { setActiveGc(null); setActiveDm(u); if (isMobile) setSidebar(false); if (u !== null) { try { ws.current?.send(JSON.stringify({ type: 'dm_history', peer: u })); } catch {} } }}
+          gcs={gcs}
+          activeGcId={activeGc}
+          onSelectGc={(gid) => { setActiveDm(null); setActiveGc(gid || null); if (gid) { try { ws.current?.send(JSON.stringify({ type: 'gc_history', gcid: gid })); } catch {} } if (isMobile) setSidebar(false); }}
+          onLogout={fullLogout}
           admins={admins}
           tags={tagsMap}
           isMobile={isMobile}
+          unreadGc={unreadGc}
         />
       </div>
 
@@ -993,16 +1205,67 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       {/* (mobile floating toggle removed per updated design) */}
 
-      {/* CHAT */}
-  <main className={`flex-1 flex flex-col bg-black relative transition-[padding] duration-300 ${isMobile && !sidebar ? 'pl-10' : 'pl-0'}`}>
-        {/* Removed top notch banner when sidebar is collapsed */}
-        {/* previously showed: DM/Main label floating at top when sidebar hidden */}
+  {/* Modals */}
+  <CreateGcModal open={makeGcOpen} me={me} users={users} onClose={() => setMakeGcOpen(false)} onCreate={createGc} />
+  <GcSettingsModal
+    open={gcSettingsOpen}
+    me={me}
+    users={users}
+    gc={activeGc ? gcs.find(g=>g.id===activeGc) || null : null}
+    onClose={() => setGcSettingsOpen(false)}
+    onSave={(name, members) => {
+      if (!activeGc) return;
+      try { ws.current?.send(JSON.stringify({ type: 'update_gc', gcid: activeGc, name, members })); } catch {}
+    }}
+    onDelete={() => { if (activeGc) { try { ws.current?.send(JSON.stringify({ type: 'delete_gc', gcid: activeGc })); } catch {} setGcSettingsOpen(false); } }}
+  />
 
-        <div ref={chatScrollRef} className="flex-1 p-6 overflow-y-auto overflow-x-hidden no-scrollbar">
-          <div className="mb-2">
-            <h3 className="text-sm text-white tracking-wide flex items-center justify-between">
-              <span>{activeDm ? `DM with ${activeDm}` : "Main Chat"}</span>
-              {activeDm && (
+  {/* CHAT */}
+  <main className={`flex-1 flex flex-col bg-black relative transition-[padding] duration-300 ${isMobile && !sidebar ? 'pl-10' : 'pl-0'}`}>
+        {/* Sticky Header */}
+        <div className="sticky top-0 z-10 bg-black/50 backdrop-blur-lg p-6 pb-2">
+          <div>
+            <h3 className="text-lg font-bold text-white tracking-wide flex items-center justify-between">
+              <span>{activeGc ? `GC: ${gcs.find(g=>g.id===activeGc)?.name || 'Group'}` : (activeDm ? `DM with ${activeDm}` : "Main Chat")}</span>
+              {activeGc ? (
+                <div className="flex items-center">
+                  {(() => {
+                    const mine = gcs.find(g=>g.id===activeGc);
+                    const amCreator = !!(mine && mine.creator === me);
+                    return (
+                      <>
+                        {amCreator && (
+                          <button
+                            onClick={() => ws.current?.send(JSON.stringify({ text: '/clear', thread: 'gc', gcid: activeGc }))}
+                            className="ml-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl bg-red-600/90 hover:bg-red-700 text-white shadow-[0_0_10px_rgba(255,0,0,0.3)] transition-all"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" /> Clear GC
+                          </button>
+                        )}
+                        {amCreator && (
+                          <button
+                            onClick={() => setGcSettingsOpen(true)}
+                            className="ml-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/10"
+                            title="Group settings"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3.5 w-3.5"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h-.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0A1.65 1.65 0 0 0 9 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0A1.65 1.65 0 0 0 20.91 9H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+                            Settings
+                          </button>
+                        )}
+                        {!amCreator && (
+                          <button
+                            onClick={() => ws.current?.send(JSON.stringify({ type: 'exit_gc', gcid: activeGc }))}
+                            className="ml-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl bg-red-600/90 hover:bg-red-700 text-white shadow-[0_0_10px_rgba(255,0,0,0.3)]"
+                          >
+                            <span className="mr-0.5">Leave</span>
+                            <LogOut className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : activeDm && (
                 <div className="flex items-center">
                   <button
                     onClick={() => ws.current?.send(JSON.stringify({ text: "/clear", thread: "dm", peer: activeDm }))}
@@ -1029,8 +1292,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
             </h3>
             <hr className="border-white/10 mt-2 mb-4" />
           </div>
+          
+        </div>
 
-          {activeDm ? (
+        <div ref={chatScrollRef} className="flex-1 p-6 overflow-y-auto overflow-x-hidden no-scrollbar">
+          {activeGc ? (
             <>
               {messages.map((m, i) => {
                 if (m.sender === "SYSTEM") {
@@ -1042,25 +1308,23 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 }
                 const mine = m.sender === me;
                 const first = i === 0 || messages[i - 1].sender !== m.sender;
-                // Only show delete if it's my own message or I'm admin/dev
                 const canDelete = mine || isAdminEffective;
                 const mime = m.mime || "";
-                const isImage = mime.startswith ? mime.startswith("image") : mime.startsWith("image");
-                const isVideo = mime.startswith ? mime.startsWith("video") : mime.startsWith("video");
-                const isAudio = mime.startswith ? mime.startsWith("audio") : mime.startsWith("audio");
+                const isImage = typeof mime === 'string' && mime.startsWith("image");
+                const isVideo = typeof mime === 'string' && mime.startsWith("video");
+                const isAudio = typeof mime === 'string' && mime.startsWith("audio");
                 const firstUrl = m.type === "message" ? extractFirstUrl(m.text) : null;
-                const onlyLinkOnly = !!firstUrl && m.text.trim() === firstUrl;
+                const onlyLinkOnly = !!firstUrl && (m.text || "").trim() === firstUrl;
                 const showUrlImg = !!firstUrl && onlyLinkOnly && isImgUrl(firstUrl);
                 const showUrlVid = !!firstUrl && onlyLinkOnly && isVidUrl(firstUrl);
-                const displayText = m.type === "message" ? m.text.replace(/^\/ai\b/i, "@ai") : m.text;
+                const displayText = m.type === "message" ? (m.text || "").replace(/^\/ai\b/i, "@ai") : m.text;
                 const mentionedCurrentUser = (m.type === "message" || m.type === "media") && mentionsMe(m.text || "");
                 const shouldFlash = !mine && mentionedCurrentUser && !!flashMap[m.id];
-                const alignRight = mine; // keep AI spinner on the left
-                // resolve tag for sender
+                const alignRight = mine;
                 const tagVal = (tagsMap as any)[m.sender];
                 const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
                 return (
-                  <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first ? "mt-3" : ""} mb-2`}>
+                  <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
                     <div
                       ref={(el) => {
                         animateIn(el);
@@ -1083,6 +1347,127 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                                 {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
                                 {tagObj && (
                                   <span className={`${(tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
+                                )}
+                              </>
+                            )}
+                          </span>
+                          <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}</span>
+                        </div>
+                      )}
+
+                      {/* AI spinner when text is empty (match DM/Main) */}
+                      {m.type === "message" && m.sender === "AI" && !(m.text && m.text.trim()) && (
+                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[85vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                           <span className="inline-flex items-center gap-2 text-[#cfc7aa]">
+                             Generating Response <Loader2 className="h-4 w-4 animate-spin" />
+                           </span>
+                         </div>
+                       )}
+                      {m.type === "message" && !(showUrlImg || showUrlVid) && !(m.sender === "AI" && !(m.text && m.text.trim())) && (
+                        <div className="relative inline-block max-w-[85vw] sm:max-w-[70ch]">
+                          <div className={`rounded-2xl px-4 py-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                            {renderRichText(displayText || "")}
+                          </div>
+                          {canDelete && (
+                            <button onClick={() => deleteMsg(m.id)} title="Delete" className={`absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto`}>
+                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {m.type === "message" && (showUrlImg || showUrlVid) && (
+                        <div className="relative">
+                          {showUrlImg ? (
+                            <img src={firstUrl!} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                          ) : (
+                            <video src={firstUrl!} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                          )}
+                          {canDelete && (
+                            <button onClick={() => deleteMsg(m.id)} title="Delete" className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto">
+                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Media message (image/video/audio) */}
+                      {m.type === "media" && (
+                        <div className="relative">
+                          {isImage ? (
+                            <img src={full(m.url)} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                          ) : isVideo ? (
+                            <video src={full(m.url)} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                          ) : isAudio ? (
+                            <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
+                          ) : (
+                            <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
+                          )}
+                          {canDelete && (
+                            <button onClick={() => deleteMsg(m.id)} title="Delete" className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto">
+                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          ) : activeDm ? (
+            <>
+              {messages.map((m, i) => {
+                if (m.sender === "SYSTEM") {
+                  return (
+                    <div key={m.id} className="flex justify-center mb-2">
+                      <div className="text-xs text-[#cfc7aa]/90 italic">{m.text || ""}</div>
+                    </div>
+                  );
+                }
+                const mine = m.sender === me;
+                const first = i === 0 || messages[i - 1].sender !== m.sender;
+                // Only show delete if it's my own message or I'm admin/dev
+                const canDelete = mine || isAdminEffective;
+                const mime = m.mime || "";
+                const isImage = typeof mime === "string" && mime.startsWith("image");
+                const isVideo = typeof mime === "string" && mime.startsWith("video");
+                const isAudio = typeof mime === "string" && mime.startsWith("audio");
+                const firstUrl = m.type === "message" ? extractFirstUrl(m.text) : null;
+                const onlyLinkOnly = !!firstUrl && (m.text || "").trim() === firstUrl;
+                const showUrlImg = !!firstUrl && onlyLinkOnly && isImgUrl(firstUrl);
+                const showUrlVid = !!firstUrl && onlyLinkOnly && isVidUrl(firstUrl);
+                const displayText = m.type === "message" ? (m.text || "").replace(/^\/ai\b/i, "@ai") : m.text;
+                const mentionedCurrentUser = (m.type === "message" || m.type === "media") && mentionsMe(m.text || "");
+                const shouldFlash = !mine && mentionedCurrentUser && !!flashMap[m.id];
+                const alignRight = mine; // keep AI spinner on the left
+                // resolve tag for sender
+                const tagVal = (tagsMap as any)[m.sender];
+                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
+                return (
+                  <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
+                    <div
+                      ref={(el) => {
+                        animateIn(el);
+                        if (el) {
+                          (el as any).dataset.mid = m.id;
+                          messageRefs.current[m.id] = el;
+                        }
+                      }}
+                      onMouseEnter={() => stopFlashing(m.id)}
+                      onClick={() => stopFlashing(m.id)}
+                      className={`relative max-w-[80%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
+                      style={shouldFlash ? { animation: "flash-red 1.6s ease-in-out infinite", borderColor: "rgba(239,68,68,0.85)", padding: "0.16rem" } : undefined}
+                    >
+                      {first && (
+                        <div className="flex items-baseline gap-2 mb-0.5">
+                          <span className={`text-sm font-semibold ${m.sender === "AI" ? "text-blue-400" : (mine ? "text-[#e7dec3]" : "text-[#cfc7aa]")}`}>
+                            {m.sender === "AI" && m.model ? `AI (${m.model})` : (
+                              <>
+                                {m.sender}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {tagObj && (
+                                  <span className={`${(tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({(tagObj as any).text})</span>
                                 )}
                               </>
                             )}
@@ -1207,7 +1592,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const tagVal = (tagsMap as any)[m.sender];
                 const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
                 return (
-                  <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first ? "mt-3" : ""} mb-2`}>
+                  <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
                     <div
                       ref={(el) => {
                         animateIn(el);
@@ -1342,6 +1727,47 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           </button>
         )}
 
+        {/* Mention toast when collapsed (red attention style) */}
+        {mentionToast && !sidebar && (
+          <button
+            onClick={() => {
+              setSidebar(true);
+              if (mentionToast.where === 'gc' && mentionToast.gcid) {
+                setActiveDm(null);
+                setActiveGc(mentionToast.gcid);
+              } else {
+                setActiveDm(null);
+                setActiveGc(null);
+              }
+            }}
+            className="group absolute left-1/2 -translate-x-1/2 bottom-56 md:bottom-56 bg-black/55 hover:bg-black/65 active:bg-black/70 text-white border border-red-500/70 shadow-[0_0_14px_rgba(255,0,0,0.45)] ring-2 ring-red-500/60 rounded-full px-5 py-2 backdrop-blur-md flex items-center gap-3 animate-pulse z-30 transition cursor-pointer focus:outline-none focus:ring-4 focus:ring-red-500/40"
+            aria-label={`Open mention in ${mentionToast.where === 'gc' ? mentionToast.label : 'Main Chat'}`}
+          >
+            <span className="flex items-center justify-center h-7 w-7 rounded-full bg-red-500 text-[12px] font-extrabold leading-none tracking-tight shadow-inner shadow-red-900/40">
+              @
+            </span>
+            <span className="text-sm font-semibold leading-none select-none">Mention in {mentionToast.where === 'gc' ? mentionToast.label : 'Main Chat'}</span>
+          </button>
+        )}
+
+        {/* GC invite toast when collapsed (red attention style) */}
+        {gcInviteToast && !sidebar && (
+          <button
+            onClick={() => {
+              setSidebar(true);
+              setActiveDm(null);
+              setActiveGc(gcInviteToast.gcid);
+            }}
+            className="group absolute left-1/2 -translate-x-1/2 bottom-72 md:bottom-72 bg-black/55 hover:bg-black/65 active:bg-black/70 text-white border border-red-500/70 shadow-[0_0_14px_rgba(255,0,0,0.45)] ring-2 ring-red-500/60 rounded-full px-5 py-2 backdrop-blur-md flex items-center gap-3 animate-pulse z-30 transition cursor-pointer focus:outline-none focus:ring-4 focus:ring-red-500/40"
+            aria-label={`Open invite to ${gcInviteToast.label}`}
+          >
+            <span className="flex items-center justify-center h-7 w-7 rounded-full bg-red-500 text-[12px] font-extrabold leading-none tracking-tight shadow-inner shadow-red-900/40">
+              +
+            </span>
+            <span className="text-sm font-semibold leading-none select-none">Invited to {gcInviteToast.label}</span>
+          </button>
+        )}
+
         {/* Scroll-to-bottom FAB shown when scrolled up */}
         {!isAtBottom && (
           <button
@@ -1358,7 +1784,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         )}
 
         {/* INPUT */}
-        <div className="relative p-4 pb-6">
+  <div className={`relative p-4 pb-6 ${isMobile ? 'chat-composer-mobile' : ''}`}> 
           {/* Decorative glass/fade backdrop behind composer with softer opacity and fade-up animation */}
           <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-36 -z-10">
             <div className="mx-3 h-full rounded-3xl border border-white/10 bg-gradient-to-t from-white/8 to-transparent backdrop-blur-xl shadow-[0_-10px_40px_rgba(255,255,255,0.06)]" style={{ opacity: 0.35, animation: "fade-rise 300ms ease-out" }} />
@@ -1495,7 +1921,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                     send();
                   }
                 }}
-                className="relative z-10 w-full bg-transparent border-none resize-none focus:outline-none text-transparent caret-[#f7f3e8] pr-16 sm:pr-12"
+                className="relative z-10 w-full bg-transparent border-none resize-none focus:outline-none text-transparent caret-[#f7f3e8] pr-16 sm:pr-12 pointer-events-auto"
                 maxRows={5}
               />
             </div>

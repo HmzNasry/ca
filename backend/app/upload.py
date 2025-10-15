@@ -31,6 +31,7 @@ async def upload_file(
     thread: str | None = Form(default=None),
     peer: str | None = Form(default=None),
     user: str | None = Form(default=None),
+    gcid: str | None = Form(default=None),
 ):
     mime = file.content_type or "application/octet-stream"
     # Try to derive a reasonable extension
@@ -56,12 +57,15 @@ async def upload_file(
     # Per-thread folder strategy:
     # - main: uploads/main/
     # - dm: uploads/dm/<sorted_userA__userB>/
+    # - gc: uploads/gc/<gcid>/
     subdir = ""
     if thread == "dm" and peer and user:
         a, b = sorted([_safe_name(user), _safe_name(peer)])
         subdir = os.path.join("dm", f"{a}__{b}")
     elif thread == "main":
         subdir = "main"
+    elif thread == "gc" and gcid:
+        subdir = os.path.join("gc", _safe_name(gcid))
     target_dir = os.path.join(UPLOAD_DIR, subdir) if subdir else UPLOAD_DIR
     os.makedirs(target_dir, exist_ok=True)
 
