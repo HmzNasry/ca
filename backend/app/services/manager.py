@@ -59,6 +59,8 @@ class ConnMgr:
         self._load_bans()
         # group chats (GCs) runtime store: id -> {name, creator, members:set[str], history:list[dict]}
         self.gcs = {}
+        # User activity: username -> bool (True=active/on tab, False=inactive)
+        self.user_activity: Dict[str, bool] = {}
         # No DB: start with empty history and groups
 
     # --- DM helpers ---
@@ -363,6 +365,8 @@ class ConnMgr:
                 self._save_bans()
         except Exception:
             pass
+        # Mark user as active on connect
+        self.user_activity[user] = True
         await ws.send_text(json.dumps({"type": "history", "items": self.history}))
         # Presence event (no SYSTEM message)
         await self._presence(user, "join")
@@ -371,6 +375,8 @@ class ConnMgr:
     async def disconnect(self, user: str):
         if user in self.active:
             self.active.pop(user)
+            # Mark user as inactive on disconnect
+            self.user_activity[user] = False
             # Presence event (no SYSTEM message)
             await self._presence(user, "leave")
             # Clean up session-scoped demotions/promotions/tags for this user if desired
@@ -392,6 +398,7 @@ class ConnMgr:
             "users": list(self.active.keys()),
             "admins": self._effective_admins(),
             "tags": self.tags,
+            "user_activity": self.user_activity,
         }
         await self._broadcast(payload)
 

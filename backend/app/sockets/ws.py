@@ -166,6 +166,13 @@ async def ws_handler(ws: WebSocket, token: str):
                     await manager._broadcast({"type": "typing", "user": sub, "typing": data["typing"], "thread": "main"})
                 continue
 
+            # NEW: handle activity events (tab active/inactive)
+            if data.get("type") == "activity":
+                active = bool(data.get("active"))
+                manager.user_activity[sub] = active
+                await manager._user_list()
+                continue
+
             # --- History for Main ---
             if data.get("type") == "history_request":
                 await ws.send_text(json.dumps({"type": "history", "items": manager.history}))

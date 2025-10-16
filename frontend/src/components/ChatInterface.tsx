@@ -745,6 +745,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         setUsers(d.users);
         if (Array.isArray(d.admins)) setAdmins(d.admins);
         if (d.tags && typeof d.tags === "object") setTagsMap(d.tags);
+        // NEW: user activity map (if present)
+        if (d.user_activity && typeof d.user_activity === "object") {
+          setUserActivity(d.user_activity);
+        }
         return;
       }
 
@@ -1198,6 +1202,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  // NEW: user activity state
+  const [userActivity, setUserActivity] = useState<Record<string, boolean>>({});
+
   return (
     <div className="flex h-screen bg-black text-[#f7f3e8] overflow-hidden relative">
       {/* utilities */}
@@ -1245,6 +1252,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           tags={tagsMap}
           isMobile={isMobile}
           unreadGc={unreadGc}
+          userActivity={userActivity}
         />
       </div>
 

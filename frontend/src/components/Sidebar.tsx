@@ -17,6 +17,7 @@ export interface SidebarProps {
   tags?: Record<string, { text: string; color?: string } | string>;
   isMobile?: boolean; // mobile overlay mode
   unreadGc?: Record<string, number>;
+  userActivity?: Record<string, boolean>; // NEW: user activity map
 }
 
 function colorClass(c?: string) {
@@ -44,7 +45,7 @@ function colorClass(c?: string) {
 
 
 
-export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sidebar, setSidebar, onSelectDm, onLogout, admins = [], tags = {}, isMobile = false, gcs = [], activeGcId = null, onSelectGc, unreadGc = {} }: SidebarProps) {
+export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sidebar, setSidebar, onSelectDm, onLogout, admins = [], tags = {}, isMobile = false, gcs = [], activeGcId = null, onSelectGc, unreadGc = {}, userActivity = {} }: SidebarProps) {
   // For mobile we slide almost completely off-screen leaving a ~34px handle (chevron pill).
   // For desktop we shrink width to a slim rail.
   const mobileCollapsedTranslate = '-translate-x-[calc(100%-2.15rem)]'; // leaves ~34px (2.15rem) visible (including padding/border)
@@ -89,6 +90,8 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
             const tagVal = (tags as any)[u];
             const tagObj = typeof tagVal === 'string' ? { textq: tagVal, color: 'orange' } : (tagVal || null);
             const isDev = !!(tagObj && ((tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow'));
+            // NEW: activity indicator
+            const isActive = userActivity && userActivity[u];
             return (
               <li key={u} className="">
                 <button
@@ -99,6 +102,10 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
                   } ${isMeUser ? "cursor-not-allowed" : "cursor-pointer"}`}
                 >
                   <div className="flex items-center justify-center w-full">
+                    {/* Activity circle indicator */}
+                    <span className="inline-flex items-center mr-2">
+                      <span className={`inline-block w-3 h-3 rounded-full border border-white/20 ${isActive ? 'bg-green-500' : 'bg-gray-500'}`}></span>
+                    </span>
                     <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}>
                       {u}
                       {isAdminUser && !isDev && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
