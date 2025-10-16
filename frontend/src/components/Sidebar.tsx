@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { Users } from "lucide-react";
 
 export interface SidebarProps {
   users: string[];
@@ -43,6 +42,8 @@ function colorClass(c?: string) {
   }
 }
 
+
+
 export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sidebar, setSidebar, onSelectDm, onLogout, admins = [], tags = {}, isMobile = false, gcs = [], activeGcId = null, onSelectGc, unreadGc = {} }: SidebarProps) {
   // For mobile we slide almost completely off-screen leaving a ~34px handle (chevron pill).
   // For desktop we shrink width to a slim rail.
@@ -50,7 +51,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
   return (
     <aside
       onClick={() => { if (!isMobile && !sidebar) setSidebar(true); }}
-      className={`h-full flex flex-col bg-[#0a0a0a]/95 backdrop-blur-sm border-r border-white/10 ${isMobile ? (sidebar ? 'rounded-tr-3xl rounded-br-3xl' : 'rounded-tr-3xl rounded-br-3xl') : 'rounded-tr-3xl rounded-br-3xl'} ${isMobile ? 'cursor-default' : 'cursor-pointer'} relative shadow-xl transition-all duration-500 ease-in-out will-change-transform
+      className={`h-full flex flex-col bg-[#0a0a0a]/95 backdrop-blur-sm border-r border-white/10 ${isMobile ? (sidebar ? 'rounded-tr-3xl rounded-br-3xl' : 'rounded-tr-3xl rounded-br-3xl') : 'rounded-tr-3xl rounded-br-3xl'} ${isMobile ? 'cursor-default' : 'cursor-pointer'} relative shadow-xl transition-all duration-300 ease-out will-change-transform
         ${isMobile ? (sidebar ? 'w-64 translate-x-0' : `w-64 ${mobileCollapsedTranslate}`) : (sidebar ? 'w-64' : 'w-12')} pointer-events-auto
       `}
     >
@@ -97,18 +98,22 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
                     selected ? "bg-[#f5f3ef] text-black border-white/20" : "border-transparent hover:bg-white/10 hover:border-white/10 text-white"
                   } ${isMeUser ? "cursor-not-allowed" : "cursor-pointer"}`}
                 >
-                  <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}>
-                    {u}
-                    {isAdminUser && !isDev && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
-                    {tagObj && (
-                      <span className={`${isDev ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
-                    )}
-                  </span>
-                  {dmCount > 0 && (
-                    <span className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center h-6 w-6 rounded-full bg-red-500 text-white text-[11px] font-extrabold leading-none shadow-inner shadow-red-900/40">
-                      {Math.min(99, dmCount)}
+                  <div className="flex items-center justify-center w-full">
+                    <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}>
+                      {u}
+                      {isAdminUser && !isDev && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                      {tagObj && (
+                        <span className={`${isDev ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
+                      )}
                     </span>
-                  )}
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                      {dmCount > 0 && (
+                        <span className="inline-flex items-center justify-center h-6 w-6 rounded-full bg-red-500 text-white text-[11px] font-extrabold leading-none shadow-inner shadow-red-900/40">
+                          {Math.min(99, dmCount)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </button>
               </li>
             );

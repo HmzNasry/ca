@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import TextareaAutosize from "react-textarea-autosize";
-import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown, Ban, LogOut } from "lucide-react";
+import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown, Ban, LogOut, Users } from "lucide-react";
 import EmojiConvertor from "emoji-js";
 import AlertModal from "@/components/AlertModal";
 
@@ -13,6 +13,7 @@ import CreateGcModal from "./modals/CreateGcModal";
 import GcSettingsModal from "./modals/GcSettingsModal";
 
 export function ChatInterface({ token, onLogout }: { token: string; onLogout: () => void }) {
+  
   // Helper to fully log out and clear username
   const fullLogout = useCallback(() => {
     try {
@@ -276,6 +277,40 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   // Auto-collapse sidebar on small screens and keep it in sync on resize
   useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        if (document.hidden) {
+          ws.current.send(JSON.stringify({ type: "activity", active: false }));
+        } else {
+          ws.current.send(JSON.stringify({ type: "activity", active: true }));
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        if (document.hidden) {
+          ws.current.send(JSON.stringify({ type: "activity", active: false }));
+        } else {
+          ws.current.send(JSON.stringify({ type: "activity", active: true }));
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  
+
+  useEffect(() => {
     const sync = () => setSidebar(window.innerWidth >= 768);
     sync();
     const onResize = () => {
@@ -284,6 +319,16 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        const t0 = Date.now();
+        ws.current.send(JSON.stringify({ type: "ping", timestamp: t0 }));
+      }
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -328,12 +373,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         }
         if (code === "DM_BLOCKED") {
           setBlockedDm(prev => ({ ...prev, [activeDmRef.current || ""]: true }));
-          showAlert("User blocked from dm");
           return;
         }
         if (code === "DM_UNBLOCKED") {
           setBlockedDm(prev => ({ ...prev, [activeDmRef.current || ""]: false }));
-          showAlert("User unblocked from dm");
           return;
         }
   const textRaw2 = d.text || "";
@@ -693,6 +736,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         }
         if (activeDmRef.current !== null || activeGcRef.current) return; // don't render main while viewing DM or GC
       }
+
+      
+
+      
 
       if (d.type === "user_list") {
         setUsers(d.users);
@@ -1221,7 +1268,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   />
 
   {/* CHAT */}
-  <main className={`flex-1 flex flex-col bg-black relative transition-[padding] duration-300 ${isMobile && !sidebar ? 'pl-10' : 'pl-0'}`}>
+  <main className={`flex-1 flex flex-col bg-black relative transition-[padding] duration-500 ease-in-out ${isMobile && !sidebar ? 'pl-10' : 'pl-0'}`}>
         {/* Sticky Header */}
         <div className="sticky top-0 z-10 bg-black/50 backdrop-blur-lg p-6 pb-2">
           <div>

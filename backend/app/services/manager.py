@@ -387,10 +387,12 @@ class ConnMgr:
         return admins
 
     async def _user_list(self):
-        payload = {"type": "user_list", "users": list(self.active.keys())}
-        # include admins and tags to support richer clients (ignored by older clients)
-        payload["admins"] = self._effective_admins()
-        payload["tags"] = self.tags
+        payload = {
+            "type": "user_list",
+            "users": list(self.active.keys()),
+            "admins": self._effective_admins(),
+            "tags": self.tags,
+        }
         await self._broadcast(payload)
 
     async def send_gc_list(self, users: List[str] | None = None):

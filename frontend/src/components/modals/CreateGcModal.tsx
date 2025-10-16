@@ -48,13 +48,14 @@ export default function CreateGcModal({ open, me, users, onClose, onCreate }: Pr
           <ul className="space-y-2">
             {others.map(u => (
               <li key={u}>
-                <label className="flex items-center gap-4 cursor-pointer select-none px-3 py-2.5 rounded-2xl hover:bg-white/5 transition">
-                  <input type="checkbox" checked={!!selected[u]} onChange={() => toggle(u)} className="peer sr-only" />
-                  <span className="inline-flex items-center justify-center h-7 w-7 rounded-2xl border border-white/25 bg-black/30 transition-all peer-checked:bg-blue-500 peer-checked:border-blue-400">
-                    <span className="text-white text-base leading-none opacity-0 peer-checked:opacity-100 transition-opacity duration-150">✓</span>
-                  </span>
+                <button
+                  onClick={() => toggle(u)}
+                  className={`w-full px-4 py-3 rounded-2xl text-left transition-colors ${
+                    selected[u] ? 'bg-blue-500 text-white' : 'hover:bg-white/10'
+                  }`}
+                >
                   <span className="text-[16px] leading-tight">{u}</span>
-                </label>
+                </button>
               </li>
             ))}
           </ul>

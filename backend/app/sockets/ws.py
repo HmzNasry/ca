@@ -141,11 +141,10 @@ async def ws_handler(ws: WebSocket, token: str):
     try:
         while True:
             data = await ws.receive_json()
-            txt = (data.get("text", "") or "").strip()
-            # Update last known IP for this username on every message
-            manager.user_ips[sub] = ws.client.host
-            # Do not normalize leading './' — keep user input exact
             now = datetime.utcnow()
+            txt = (data.get("text", "") or "").strip()
+
+            
 
             if data.get("typing"):
                 # Scope typing to the active thread
@@ -562,6 +561,18 @@ async def ws_handler(ws: WebSocket, token: str):
                 creator = (manager.gcs.get(gid) or {}).get("creator")
                 manager.update_gc(gid, name=name if isinstance(name, str) else None, members=members)
                 after = set((manager.gcs.get(gid) or {}).get("members", set()))
+                
+                # --- Start of new logic ---
+                joined = after - before
+                left = before - after
+
+                for user in joined:
+                    await manager._broadcast_gc_update(gid, {"type": "gc_member_joined", "user": user, "gcid": gid})
+                
+                for user in left:
+                    await manager._broadcast_gc_update(gid, {"type": "gc_member_left", "user": user, "gcid": gid})
+                # --- End of new logic ---
+
                 # Push updated lists to all impacted users (before ∪ after ∪ {creator})
                 try:
                     affected = list(before.union(after).union({creator} if creator else set()))
