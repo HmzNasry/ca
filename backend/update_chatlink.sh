@@ -44,7 +44,7 @@ fi
 echo -e "${GREEN}Tunnel URL found: $TUNNEL_URL${NC}"
 
 # Update the HTML file with the new URL
-sed -i "s|window.location.href = \"[^\"]*\";|window.location.href = \"$TUNNEL_URL\";|g" index.html
+sed -i "s|href=\"[^\"]*\"|href=\"$TUNNEL_URL\"|g" index.html
 
 # Commit and push changes
 echo -e "${YELLOW}Updating GitHub repository...${NC}"
