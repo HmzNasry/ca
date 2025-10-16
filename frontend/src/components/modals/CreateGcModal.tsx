@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type Props = {
   open: boolean;
@@ -11,15 +11,18 @@ type Props = {
 export default function CreateGcModal({ open, me, users, onClose, onCreate }: Props) {
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<Record<string, boolean>>({});
-  // Reset fields when modal is opened (do not reset on every render)
-  // This ensures typing and checkbox toggling are not interrupted
-  // and still resets the form between separate openings.
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
   useEffect(() => {
     if (open) {
       setName("");
       setSelected({});
+      if (buttonRef.current) {
+        buttonRef.current.focus();
+      }
     }
   }, [open]);
+
   if (!open) return null;
   const others = users.filter(u => u !== me);
   const toggle = (u: string) => setSelected(prev => ({ ...prev, [u]: !prev[u] }));
@@ -31,8 +34,14 @@ export default function CreateGcModal({ open, me, users, onClose, onCreate }: Pr
   return (
     <div className="fixed inset-0 z-[150] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-  <style>{`@keyframes modal-in{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}`}</style>
-  <div className="relative w-[min(88vw,480px)] max-h-[86vh] overflow-hidden bg-black/90 border border-white/30 rounded-3xl shadow-2xl text-[#f7f3e8] p-0 flex flex-col animate-[modal-in_140ms_ease-out]">
+      <style>{`@keyframes modal-in{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}`}</style>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+        className="relative w-[min(88vw,480px)] max-h-[86vh] overflow-hidden bg-black/90 border border-white/30 rounded-3xl shadow-2xl text-[#f7f3e8] p-0 flex flex-col animate-[modal-in_140ms_ease-out]"
+      >
         <div className="text-center text-white text-lg font-semibold py-4">Create GC</div>
         <hr className="border-white/10" />
         <div className="p-4">
@@ -48,25 +57,29 @@ export default function CreateGcModal({ open, me, users, onClose, onCreate }: Pr
           <ul className="space-y-2">
             {others.map(u => (
               <li key={u}>
-                <button
-                  onClick={() => toggle(u)}
-                  className={`w-full px-4 py-3 rounded-2xl text-left transition-colors ${
-                    selected[u] ? 'bg-blue-500 text-white' : 'hover:bg-white/10'
-                  }`}
-                >
+                <label className="flex items-center gap-4 cursor-pointer select-none px-2 py-2 rounded-xl hover:bg-white/5 transition">
+                  <input
+                    type="checkbox"
+                    checked={!!selected[u]}
+                    onChange={() => toggle(u)}
+                    className="peer sr-only"
+                  />
+                  <span className="inline-flex items-center justify-center h-7 w-7 rounded-xl border-2 border-white/25 bg-transparent transition-all duration-100 peer-checked:bg-white peer-checked:border-white">
+                    <svg className="h-4 w-4 text-black opacity-0 peer-checked:opacity-100 transition-opacity duration-100" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5"><path d="M20 6 9 17l-5-5"/></svg>
+                  </span>
                   <span className="text-[16px] leading-tight">{u}</span>
-                </button>
+                </label>
               </li>
             ))}
           </ul>
         </div>
         <hr className="border-white/10" />
         <div className="p-4">
-          <button onClick={submit} className="w-full bg-white text-black rounded-2xl py-2.5 font-medium hover:brightness-95 active:scale-[0.99] transition">
+          <button ref={buttonRef} type="submit" className="w-full bg-white text-black rounded-2xl py-2.5 font-medium hover:brightness-95 active:scale-[0.99] transition">
             Create GC
           </button>
         </div>
-      </div>
+      </form>
     </div>
   );
 }

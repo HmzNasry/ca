@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Users } from "lucide-react";
 
 export interface SidebarProps {
   users: string[];

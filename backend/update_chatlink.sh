@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,6 +12,15 @@ cd ../chatlink || {
   echo -e "${RED}Error: chatlink directory not found${NC}"
   exit 1
 }
+
+# Clean up any previous failed rebases or merges
+if [ -f .git/REBASE_HEAD ] || [ -d .git/rebase-merge ]; then
+  echo -e "${YELLOW}Cleaning up previous rebase...${NC}"
+  git rebase --abort 2>/dev/null
+fi
+
+# Reset any unmerged files
+git reset --hard HEAD 2>/dev/null
 
 # Start cloudflared tunnel in background and capture output
 echo -e "${YELLOW}Starting cloudflared tunnel...${NC}"
@@ -43,14 +51,34 @@ fi
 
 echo -e "${GREEN}Tunnel URL found: $TUNNEL_URL${NC}"
 
-# Update the HTML file with the new URL
-sed -i "s|href=\"[^\"]*\"|href=\"$TUNNEL_URL\"|g" index.html
+# Update the HTML file with the new URL (replace all Cloudflare URLs)
+sed -i "s|https://[a-zA-Z0-9-]*\.trycloudflare\.com|$TUNNEL_URL|g" index.html
+
+# Pull latest changes first
+echo -e "${YELLOW}Pulling latest changes from remote...${NC}"
+git pull origin master --strategy-option=theirs || {
+  echo -e "${RED}Error: Failed to pull changes${NC}"
+  kill $TUNNEL_PID 2>/dev/null
+  exit 1
+}
+
+# Update the HTML file again (in case remote had changes)
+sed -i "s|https://[a-zA-Z0-9-]*\.trycloudflare\.com|$TUNNEL_URL|g" index.html
 
 # Commit and push changes
 echo -e "${YELLOW}Updating GitHub repository...${NC}"
 git add index.html
-git commit -m "Update tunnel URL to $TUNNEL_URL"
-git push
+git commit -m "Update tunnel URL to $TUNNEL_URL" || {
+  # No changes to commit (file already up to date)
+  echo -e "${YELLOW}No changes to commit${NC}"
+}
+
+# Push changes
+git push origin master || {
+  echo -e "${RED}Error: Failed to push changes${NC}"
+  kill $TUNNEL_PID 2>/dev/null
+  exit 1
+}
 
 echo -e "${GREEN}✅ ChatLink updated successfully!${NC}"
 echo -e "${GREEN}GitHub Pages: https://hmznasry.github.io/chatlink/${NC}"
@@ -62,4 +90,3 @@ rm -f tunnel_output.log
 
 echo -e "${YELLOW}Script completed. Tunnel is running in background with PID $TUNNEL_PID${NC}"
 echo -e "${YELLOW}To stop the tunnel, run: kill $TUNNEL_PID${NC}"
-
