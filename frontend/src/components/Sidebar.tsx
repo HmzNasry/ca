@@ -53,7 +53,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
   return (
     <aside
       onClick={() => { if (!isMobile && !sidebar) setSidebar(true); }}
-      className={`h-full flex flex-col bg-[#0a0a0a]/95 backdrop-blur-sm border-r border-white/10 ${isMobile ? (sidebar ? 'rounded-tr-3xl rounded-br-3xl' : 'rounded-tr-3xl rounded-br-3xl') : 'rounded-tr-3xl rounded-br-3xl'} ${isMobile ? 'cursor-default' : 'cursor-pointer'} relative shadow-xl transition-all duration-300 ease-out will-change-transform
+      className={`h-full flex flex-col bg-[#0a0a0a]/95 backdrop-blur-sm border-r border-white/10 ${isMobile ? (sidebar ? 'rounded-tr-3xl rounded-br-3xl' : 'rounded-tr-3xl rounded-br-3xl') : 'rounded-tr-3xl rounded-br-3xl'} ${isMobile ? 'cursor-default' : 'cursor-pointer'} relative shadow-xl transition-[width,transform] duration-300 ease-out will-change-transform
         ${isMobile ? (sidebar ? 'w-64 translate-x-0' : `w-64 ${mobileCollapsedTranslate}`) : (sidebar ? 'w-64' : 'w-12')} pointer-events-auto
       `}
     >
@@ -97,7 +97,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
               <li key={u} className="">
                 <button
                   disabled={isMeUser}
-                  onClick={() => !isMeUser && onSelectDm(u)}
+                  onClick={() => { if (!isMeUser) { onSelectDm(u); if (isMobile) setSidebar(false); } }}
                   className={`relative w-full px-3 py-2 rounded-xl border transition flex items-center justify-center text-center select-none ${
                     selected ? "bg-[#f5f3ef] text-black border-white/20" : "border-transparent hover:bg-white/10 hover:border-white/10 text-white"
                   } ${isMeUser ? "cursor-not-allowed" : "cursor-pointer"}`}
@@ -130,7 +130,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
         <hr className="border-white/10 mt-6 mb-4 mx-3" />
         <div className="px-4 pb-3">
           <button
-            onClick={() => onSelectDm(null)}
+            onClick={() => { onSelectDm(null); if (isMobile) setSidebar(false); }}
             className={`relative w-full px-3 py-2 rounded-xl border transition flex items-center justify-center text-center select-none ${
               (activeDm === null && !activeGcId) ? "bg-[#f5f3ef] text-black border-white/20" : "border-transparent hover:bg-white/10 hover:border-white/10 text-white"
             }`}
@@ -152,7 +152,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
             {gcs.map(gc => (
               <li key={gc.id}>
                 <button
-                  onClick={() => onSelectGc && onSelectGc(gc.id)}
+                  onClick={() => { if (onSelectGc) { onSelectGc(gc.id); if (isMobile) setSidebar(false); } }}
                   className={`relative w-full px-10 py-2 rounded-xl border transition flex items-center justify-center ${activeGcId === gc.id ? 'bg-[#f5f3ef] text-black border-white/20' : 'border-transparent hover:bg-white/10 hover:border-white/10 text-white'}`}
                 >
                   {/* Left: member count with icon (absolute) */}

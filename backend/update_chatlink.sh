@@ -24,7 +24,7 @@ git reset --hard HEAD 2>/dev/null
 
 # Start cloudflared tunnel in background and capture output
 echo -e "${YELLOW}Starting cloudflared tunnel...${NC}"
-sudo -u chatapp cloudflared tunnel --url http://localhost:8000 >tunnel_output.log 2>&1 &
+sudo -u chatapp cloudflared tunnel --url http://localhost:8080 >tunnel_output.log 2>&1 &
 TUNNEL_PID=$!
 
 # Wait a moment for tunnel to establish

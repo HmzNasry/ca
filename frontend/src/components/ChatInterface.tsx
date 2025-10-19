@@ -716,8 +716,6 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           const body = typeof d.text === 'string' && d.text ? d.text : (d.mime || 'media');
           notify(title, body);
         }
-        if (!seen.current.has(d.id)) setMessages(prev => [...prev, d]);
-        return;
       }
 
       // Main thread notifications / unread when off main OR mention OR tab hidden
@@ -1122,31 +1120,31 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       const now = (ctx as any).currentTime;
 
-      // First tone (lower), slightly longer and louder
+      // First tone (lower)
       const o1 = (ctx as any).createOscillator();
       const g1 = (ctx as any).createGain();
-      o1.type = "triangle";
-      o1.frequency.setValueAtTime(950, now);
+      o1.type = "sine";
+      o1.frequency.setValueAtTime(600, now);
       o1.connect(g1);
       g1.connect((ctx as any).destination);
       g1.gain.setValueAtTime(0.0001, now);
-      g1.gain.exponentialRampToValueAtTime(0.16, now + 0.02);
-      g1.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+      g1.gain.exponentialRampToValueAtTime(0.1, now + 0.02);
+      g1.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
       o1.start(now);
-      o1.stop(now + 0.28);
+      o1.stop(now + 0.22);
 
-      // Second tone (higher) for a pleasant two-note ping
+      // Second tone (higher)
       const o2 = (ctx as any).createOscillator();
       const g2 = (ctx as any).createGain();
       o2.type = "sine";
-      o2.frequency.setValueAtTime(1400, now + 0.16);
+      o2.frequency.setValueAtTime(900, now + 0.1);
       o2.connect(g2);
       g2.connect((ctx as any).destination);
-      g2.gain.setValueAtTime(0.0001, now + 0.16);
-      g2.gain.exponentialRampToValueAtTime(0.12, now + 0.18);
-      g2.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
-      o2.start(now + 0.16);
-      o2.stop(now + 0.36);
+      g2.gain.setValueAtTime(0.0001, now + 0.1);
+      g2.gain.exponentialRampToValueAtTime(0.08, now + 0.12);
+      g2.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+      o2.start(now + 0.1);
+      o2.stop(now + 0.27);
     } catch {}
   }, []);
 
@@ -1469,6 +1467,20 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                   </div>
                 );
               })}
+              {typingUser && (
+                <div
+                  className={`mt-1 mb-2 text-m text-[#cfc7aa]/70 italic transition-all duration-250 ease-out ${typingVisible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-0.5"}`}
+                  style={{ willChange: "opacity, transform" }}
+                >
+                  {typingUser} is typing
+                  <span className="inline-flex w-6 ml-1">
+                    <span style={{ animation: "typing-dot 1.1s infinite ease-in-out", animationDelay: "0ms" }}>.</span>
+                    <span style={{ animation: "typing-dot 1.1s infinite ease-in-out", animationDelay: "200ms" }}>.</span>
+                    <span style={{ animation: "typing-dot 1.1s infinite ease-in-out", animationDelay: "300ms" }}>.</span>
+                  </span>
+                </div>
+              )}
+              <div ref={bottomRef} />
             </>
           ) : activeDm ? (
             <>
