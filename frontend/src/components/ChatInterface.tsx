@@ -952,7 +952,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         showAlert('Usage: /unlocktag "username"');
         return;
       }
-      if (/^\s*\/unmute\b/i.test(txt) && !/^\s*\/unmute\s+(?:"[^"]+"|\S+)\s*$/i.test(txt)) {
+      if (/^\s*\/unmute\b/i.test(txt) && !/^\s*\/unmute\s+"[^"]+"\s*$/i.test(txt)) {
         showAlert('Usage: /unmute "username"');
         return;
       }

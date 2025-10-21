@@ -68,7 +68,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         if target in manager.active:
             await manager._system(f"{target} was kicked by admin", store=False)
             try:
-                await manager.active[target].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "YOU WERE KICKED BY ADMIN"}))
+                await manager.active[target].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "You were kicked by admin"}))
             except: pass
             await manager.active[target].close()
             manager.active.pop(target, None)
