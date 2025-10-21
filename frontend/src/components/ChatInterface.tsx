@@ -885,7 +885,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
     // Intercept admin-only commands for non-admins and show modal instead of sending
     if (!isAdminEffective) {
-  const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag|\/purgeadmin|\/muteA|\/unmuteA|\/psa)\b/i;
+  const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag|\/purgeadmin|\/muteA|\/unmuteA|\/psa)(?:\s|$)/i;
       // allow /clear in DM (scoped)
       if (/^\s*\/clear\s*$/i.test(txt) && activeDm) {
         // let it through
