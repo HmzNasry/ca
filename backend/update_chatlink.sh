@@ -51,11 +51,6 @@ fi
 
 echo -e "${GREEN}Tunnel URL found: $TUNNEL_URL${NC}"
 
-export TUNNEL_URL="$TUNNEL_URL"
-export DISCORD_BOT_TOKEN="MTQzMTA0MzI3MjQ5MDQ4MzgwNg.GOuYau.NBoRAkd1MsosJdgwoFtxMKXZiTpXBK6wJOKIjg"
-export TARGET_USER_IDS="1399272040002752594,976002531945762876, 872191822221418516"
-python3 ./send_discord_dm.py
-
 # Update the HTML file with the new URL (replace all Cloudflare URLs)
 sed -i "s|https://[a-zA-Z0-9-]*\.trycloudflare\.com|$TUNNEL_URL|g" index.html
 
