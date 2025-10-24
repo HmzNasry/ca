@@ -1,4 +1,4 @@
-import json, os, re, shutil, asyncio
+import json, os, re, shutil, asyncio, httpx
 from datetime import datetime
 from fastapi import WebSocket, WebSocketDisconnect, status
 from jose import jwt, JWTError
@@ -25,6 +25,54 @@ from .helpers import (
 from .commands.admin import handle_admin_commands
 from .commands.moderation import handle_moderation_commands
 from .commands.tags import handle_tag_commands
+
+SPOTIFY_RE = re.compile(r'(https?://open.spotify.com/(track|playlist|album)/[a-zA-Z0-9]+)')
+YOUTUBE_RE = re.compile(r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtube\.com/shorts/|youtu\.be/)[^\s]+)')
+
+async def get_spotify_preview(text: str):
+    match = SPOTIFY_RE.search(text)
+    if not match:
+        return None
+    
+    spotify_url = match.group(1)
+    try:
+        async with httpx.AsyncClient() as client:
+            # Use Spotify's oEmbed API
+            oembed_url = f"https://open.spotify.com/oembed?url={spotify_url}"
+            response = await client.get(oembed_url)
+            response.raise_for_status()
+            data = response.json()
+            # Return the HTML for the iframe embed
+            return data.get("html")
+    except httpx.RequestError as e:
+        logger.error(f"Failed to fetch Spotify preview for {spotify_url}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while fetching Spotify preview: {e}")
+        return None
+
+async def get_youtube_preview(text: str):
+    match = YOUTUBE_RE.search(text)
+    if not match:
+        return None
+    
+    youtube_url = match.group(1)
+    try:
+        async with httpx.AsyncClient() as client:
+            oembed_url = f"https://www.youtube.com/oembed?url={youtube_url}&format=json"
+            response = await client.get(oembed_url, headers={"User-Agent": "GeminiChat/1.0"})
+            response.raise_for_status()
+            data = response.json()
+            return data.get("html")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"YouTube oEmbed failed for {youtube_url} with status {e.response.status_code}")
+        return f"YOUTUBE_PREVIEW_FAILED: HTTP {e.response.status_code}"
+    except httpx.RequestError as e:
+        logger.error(f"Failed to fetch YouTube preview for {youtube_url}: {e}")
+        return "YOUTUBE_PREVIEW_FAILED: RequestError"
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while fetching YouTube preview: {e}")
+        return "YOUTUBE_PREVIEW_FAILED: Unexpected"
 
 manager = ConnMgr()
 manager.HISTORY = 100 if hasattr(manager, 'HISTORY') else None
@@ -360,6 +408,17 @@ async def ws_handler(ws: WebSocket, token: str):
                         dm_text = str(data.get("text"))[:4000]
                         mid = f"{sub}-{int(now.timestamp()*1000)}"
                         msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": dm_text, "thread": "dm", "peer": peer}
+                        
+                        # Get Spotify preview
+                        spotify_preview_html = await get_spotify_preview(msg["text"])
+                        if spotify_preview_html:
+                            msg["spotify_preview_html"] = spotify_preview_html
+                        else:
+                            # If no Spotify preview, check for YouTube
+                            youtube_preview_html = await get_youtube_preview(msg["text"])
+                            if youtube_preview_html:
+                                msg["youtube_preview_html"] = youtube_preview_html
+
                         await manager._broadcast_dm(sub, peer, msg)
                     elif data.get("url"):
                         # Last-chance routing for commands carried via url payload (unlikely) — skip
@@ -517,6 +576,17 @@ async def ws_handler(ws: WebSocket, token: str):
                     gc_text = str(data.get("text"))[:4000]
                     mid = f"{sub}-{int(now.timestamp()*1000)}"
                     msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": gc_text, "thread": "gc"}
+                    
+                    # Get Spotify preview
+                    spotify_preview_html = await get_spotify_preview(msg["text"])
+                    if spotify_preview_html:
+                        msg["spotify_preview_html"] = spotify_preview_html
+                    else:
+                        # If no Spotify preview, check for YouTube
+                        youtube_preview_html = await get_youtube_preview(msg["text"])
+                        if youtube_preview_html:
+                            msg["youtube_preview_html"] = youtube_preview_html
+
                     await manager._broadcast_gc(gid, msg)
                 elif data.get("url"):
                     if manager.is_muted(sub):
@@ -784,6 +854,17 @@ async def ws_handler(ws: WebSocket, token: str):
                 ts = now.isoformat() + "Z"
                 mid = f"{sub}-{int(now.timestamp()*1000)}"
                 msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": str(data.get("text"))[:4000], "thread": "main"}
+                
+                # Get Spotify preview
+                spotify_preview_html = await get_spotify_preview(msg["text"])
+                if spotify_preview_html:
+                    msg["spotify_preview_html"] = spotify_preview_html
+                else:
+                    # If no Spotify preview, check for YouTube
+                    youtube_preview_html = await get_youtube_preview(msg["text"])
+                    if youtube_preview_html:
+                        msg["youtube_preview_html"] = youtube_preview_html
+                
                 await manager._broadcast(msg)
             elif data.get("url"):
                 if manager.is_muted(sub):

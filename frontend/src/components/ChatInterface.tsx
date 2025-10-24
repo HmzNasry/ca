@@ -11,6 +11,8 @@ import EmojiPanel from "./EmojiPanel";
 import AttachmentPreview from "./AttachmentPreview";
 import CreateGcModal from "./modals/CreateGcModal";
 import GcSettingsModal from "./modals/GcSettingsModal";
+import SpotifyPreview from "./SpotifyPreview";
+import YouTubePreview from "./YouTubePreview";
 
 export function ChatInterface({ token, onLogout }: { token: string; onLogout: () => void }) {
   
@@ -1005,7 +1007,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   // Normal send flow (supports Main, DM, and GC)
     setSending(true);
-  const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {});
+    forceScrollRef.current = true; // always scroll to bottom when sending
+    const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {});
     try {
       if (txt && files.length > 0) {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -1388,7 +1391,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       }}
                       onMouseEnter={() => stopFlashing(m.id)}
                       onClick={() => stopFlashing(m.id)}
-                      className={`relative max-w-[80%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
+                      className={`relative max-w-[95%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
                       style={shouldFlash ? { animation: "flash-red 1.6s ease-in-out infinite", borderColor: "rgba(239,68,68,0.85)", padding: "0.16rem" } : undefined}
                     >
                       {first && (
@@ -1523,7 +1526,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       }}
                       onMouseEnter={() => stopFlashing(m.id)}
                       onClick={() => stopFlashing(m.id)}
-                      className={`relative max-w-[80%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
+                      className={`relative max-w-[95%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
                       style={shouldFlash ? { animation: "flash-red 1.6s ease-in-out infinite", borderColor: "rgba(239,68,68,0.85)", padding: "0.16rem" } : undefined}
                     >
                       {first && (
@@ -1567,6 +1570,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                           )}
                         </div>
                       )}
+
+                      {/* Spotify Preview */}
+                      {m.spotify_preview_html && <SpotifyPreview htmlContent={m.spotify_preview_html} />}
+
+                      {/* YouTube Preview */}
+                      {m.youtube_preview_html && <YouTubePreview htmlContent={m.youtube_preview_html} />}
 
                       {/* URL preview bubble for pure links */}
                       {m.type === "message" && (showUrlImg || showUrlVid) && (
@@ -1670,7 +1679,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       }}
                       onMouseEnter={() => stopFlashing(m.id)}
                       onClick={() => stopFlashing(m.id)}
-                      className={`relative max-w-[80%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
+                      className={`relative max-w-[95%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
                       style={shouldFlash ? { animation: "flash-red 1.6s ease-in-out infinite", borderColor: "rgba(239,68,68,0.85)", padding: "0.16rem" } : undefined}
                     >
                       {first && (
@@ -1714,6 +1723,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                           )}
                         </div>
                       )}
+
+                      {/* Spotify Preview */}
+                      {m.spotify_preview_html && <SpotifyPreview htmlContent={m.spotify_preview_html} />}
+
+                      {/* YouTube Preview */}
+                      {m.youtube_preview_html && <YouTubePreview htmlContent={m.youtube_preview_html} />}
 
                       {/* URL preview bubble for pure links */}
                       {m.type === "message" && (showUrlImg || showUrlVid) && (
