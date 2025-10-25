@@ -87,11 +87,25 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const fallbackFlashRefs = useRef<Record<string, number>>({});
   // Chat scroll container (use as IntersectionObserver root)
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
 
   // Auto-scroll management
   const [isAtBottom, setIsAtBottom] = useState(true);
   const isAtBottomRef = useRef(true);
   const forceScrollRef = useRef(false);
+
+  // NEW: ResizeObserver to handle scrolling on content changes (e.g. images loading)
+  useEffect(() => {
+    const observer = new ResizeObserver(() => {
+      if (isAtBottomRef.current) {
+        bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+      }
+    });
+    if (messageListRef.current) {
+      observer.observe(messageListRef.current);
+    }
+    return () => observer.disconnect();
+  }, []);
 
   // Active mention targets: online users + 'ai'
   const activeMentions = useMemo(() => {
@@ -1352,6 +1366,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         </div>
 
         <div ref={chatScrollRef} className="flex-1 p-6 overflow-y-auto overflow-x-hidden no-scrollbar">
+          <div ref={messageListRef}>
           {activeGc ? (
             <>
               {messages.map((m, i) => {
@@ -1793,6 +1808,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
               <div ref={bottomRef} />
             </>
           )}
+          </div>
         </div>
 
         {/* DM toast when collapsed */}

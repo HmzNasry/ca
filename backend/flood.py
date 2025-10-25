@@ -81,7 +81,7 @@ async def send_ws(session: aiohttp.ClientSession, base_url: str, token: str, mes
 
 
 async def worker(i: int, base_url: str, password: str, message: str, sem: asyncio.Semaphore):
-    username = f"W STAR {i}"
+    username = f"SPAM {i}"
     async with sem:
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
