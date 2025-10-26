@@ -13,6 +13,9 @@ async def handle_moderation_commands(manager: ConnMgr, ws, sub: str, role: str, 
     # /mute "user" <minutes>; admin or dev
     m = re.match(r'^\s*/mute\s+"([^"]+)"\s+(\d+)\s*$', txt, re.I)
     if m and is_adminish:
+        if manager.mute_all and not is_dev(manager, sub):
+            await _alert(ws, "INFO", "Muting is disabled by DEV.")
+            return True
         target_raw = m.group(1)
         target = canonical_user(manager, target_raw)
         minutes = int(m.group(2))
@@ -35,6 +38,9 @@ async def handle_moderation_commands(manager: ConnMgr, ws, sub: str, role: str, 
     # /unmute "user"; admin or dev
     m = re.match(r'^\s*/unmute\s+"([^"]+)"\s*$', txt, re.I)
     if m and is_adminish:
+        if manager.mute_all and not is_dev(manager, sub):
+            await _alert(ws, "INFO", "Unmuting is disabled by DEV.")
+            return True
         target_raw = m.group(1)
         target = canonical_user(manager, target_raw)
         manager.unmute_user(target)

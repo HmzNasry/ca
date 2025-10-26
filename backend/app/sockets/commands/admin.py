@@ -128,6 +128,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         if not is_dev(manager, sub):
             await _alert(ws, "INFO", "only DEV can use /muteA")
             return True
+        manager.mute_all = True
         minutes = int(m.group(1))
         for u in list(manager.active.keys()):
             if u == sub and is_dev(manager, u):
@@ -153,18 +154,9 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         if not is_dev(manager, sub):
             await _alert(ws, "INFO", "only DEV can use /unmuteA")
             return True
+        manager.mute_all = False
         for u in list(manager.mutes.keys()):
             manager.unmute_user(u)
-        # Notify connected users that were muted to refresh any client-side timers
-        for u, ws_target in list(manager.active.items()):
-            try:
-                await ws_target.send_text(json.dumps({
-                    "type": "alert",
-                    "code": "INFO",
-                    "text": "All mutes have been lifted"
-                }))
-            except:
-                pass
         await manager._system("all mutes lifted by admin", store=False)
         return True
 

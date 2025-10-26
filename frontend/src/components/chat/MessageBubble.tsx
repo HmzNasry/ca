@@ -37,7 +37,25 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
   }
   const mine = m.sender === me;
   const first = i === 0 || messages[i - 1].sender !== m.sender;
-  const canDelete = mine || isAdminEffective;
+
+  const author = m.sender;
+  const isAuthorDev = (() => {
+    const tag = tagsMap[author];
+    if (!tag) return false;
+    return tag.special === 'dev' || tag.color === 'rainbow' || String(tag.text || '').toUpperCase() === 'DEV';
+  })();
+  const isAuthorAdmin = admins.includes(author) && !isAuthorDev;
+
+  const canDelete = (() => {
+    if (mine) return true;
+    if (isAuthorDev) return false; // Nobody can delete a dev's message except the dev themselves (handled by `mine`)
+    if (isAdminEffective) {
+        if (isAuthorAdmin) return false; // Admins can't delete other admins' messages
+        return true; // Admins can delete non-admin/non-dev messages
+    }
+    return false;
+  })();
+
   const mime = String(m.mime || "");
   const isImage = mime.startsWith("image");
   const isVideo = mime.startsWith("video");

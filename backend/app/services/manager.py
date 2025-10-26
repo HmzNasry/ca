@@ -51,6 +51,7 @@ class ConnMgr:
         self.tag_locks: set[str] = set()
         # mutes
         self.mutes: Dict[str, datetime] = {}
+        self.mute_all = False
         # per-DM mutes: key = (receiver, sender)
         self.dm_mutes: Dict[tuple[str, str], datetime] = {}
         # bans
