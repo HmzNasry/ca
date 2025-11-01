@@ -24,7 +24,7 @@ git reset --hard HEAD 2>/dev/null
 
 # Start cloudflared tunnel in background and capture output
 echo -e "${YELLOW}Starting cloudflared tunnel...${NC}"
-sudo -u chatapp cloudflared tunnel --url http://localhost:8080 >tunnel_output.log 2>&1 &
+cloudflared tunnel --url http://localhost:8080 >tunnel_output.log 2>&1 &
 TUNNEL_PID=$!
 
 # Wait a moment for tunnel to establish
@@ -54,10 +54,23 @@ echo -e "${GREEN}Tunnel URL found: $TUNNEL_URL${NC}"
 # Update the HTML file with the new URL (replace all Cloudflare URLs)
 sed -i "s|https://[a-zA-Z0-9-]*\.trycloudflare\.com|$TUNNEL_URL|g" index.html
 
-# Pull latest changes first
-echo -e "${YELLOW}Pulling latest changes from remote...${NC}"
-git pull origin master --strategy-option=theirs || {
-  echo -e "${RED}Error: Failed to pull changes${NC}"
+export GIT_SSH_COMMAND="ssh -i /home/hzr/.ssh/id_rsa -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
+eval $(ssh-agent -s)
+ssh-add /home/hzr/.ssh/id_rsa
+git config --global --add safe.directory /data/chatapp/chatlink
+
+# Fetch the latest changes from the remote
+echo -e "${YELLOW}Fetching latest changes from remote...${NC}"
+git fetch origin master || {
+  echo -e "${RED}Error: Failed to fetch from remote${NC}"
+  kill $TUNNEL_PID 2>/dev/null
+  exit 1
+}
+
+# Reset the local branch to be identical to the remote branch
+echo -e "${YELLOW}Resetting local branch to match remote...${NC}"
+git reset --hard origin/master || {
+  echo -e "${RED}Error: Failed to reset local branch${NC}"
   kill $TUNNEL_PID 2>/dev/null
   exit 1
 }
@@ -65,6 +78,8 @@ git pull origin master --strategy-option=theirs || {
 # Update the HTML file again (in case remote had changes)
 sed -i "s|https://[a-zA-Z0-9-]*\.trycloudflare\.com|$TUNNEL_URL|g" index.html
 
+git config --global user.email "chatapp@localhost"
+git config --global user.name "chatapp"
 # Commit and push changes
 echo -e "${YELLOW}Updating GitHub repository...${NC}"
 git add index.html
@@ -74,7 +89,7 @@ git commit -m "Update tunnel URL to $TUNNEL_URL" || {
 }
 
 # Push changes
-git push origin master || {
+git push origin master --force || {
   echo -e "${RED}Error: Failed to push changes${NC}"
   kill $TUNNEL_PID 2>/dev/null
   exit 1

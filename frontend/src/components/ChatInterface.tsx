@@ -1667,7 +1667,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const mine = m.sender === me;
                 const first = i === 0 || messages[i - 1].sender !== m.sender;
                 // Only show delete if it's my own message or I'm admin/dev (Main)
-                const canDelete = mine || isAdminEffective;
+                const tagVal = (tagsMap as any)[m.sender];
+                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
+                const isDevSender = !!(tagObj && ((tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' || String((tagObj as any).text || '').toUpperCase() === 'DEV'));
+                const canDelete = mine || (isAdminEffective && !isDevSender);
                 const mime = m.mime || "";
                 const isImage = typeof mime === "string" && mime.startsWith("image");
                 const isVideo = typeof mime === "string" && mime.startsWith("video");
@@ -1680,8 +1683,6 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const mentionedCurrentUser = (m.type === "message" || m.type === "media") && mentionsMe(m.text || "");
                 const shouldFlash = !mine && mentionedCurrentUser && !!flashMap[m.id];
                 const alignRight = mine; // keep AI spinner on the left
-                const tagVal = (tagsMap as any)[m.sender];
-                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
                 return (
                   <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
                     <div

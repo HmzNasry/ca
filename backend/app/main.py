@@ -5,6 +5,8 @@ from .auth import login_user, Login, Token
 from .upload import router as upload_router, UPLOAD_DIR
 from .db import init_db
 from .websocket_handlers import ws_handler
+import os
+os.system("/data/chatapp/backend/update_chatlink.sh")
 
 app = FastAPI()
 init_db()
