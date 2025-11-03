@@ -22,13 +22,50 @@ def _clamp_label(text: str) -> tuple[str, bool]:
     return (s[: MAX_TAG_LABEL_LEN - 1] + "…", True)
 
 async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: str) -> bool:
+    # Helpers: validate and parse color flags (named or hex) with default 'white'
+    def _normalize_hex(h: str) -> str | None:
+        if not isinstance(h, str):
+            return None
+        s = h.strip()
+        if not s.startswith('#'):
+            return None
+        s = s[1:]
+        if re.fullmatch(r'[0-9a-fA-F]{3}', s):
+            r, g, b = s[0], s[1], s[2]
+            return f"#{r}{r}{g}{g}{b}{b}".lower()
+        if re.fullmatch(r'[0-9a-fA-F]{4}', s):
+            r, g, b, a = s[0], s[1], s[2], s[3]
+            return f"#{r}{r}{g}{g}{b}{b}{a}{a}".lower()
+        if re.fullmatch(r'[0-9a-fA-F]{6}', s):
+            return f"#{s.lower()}"
+        if re.fullmatch(r'[0-9a-fA-F]{8}', s):
+            return f"#{s.lower()}"
+        return None
+
+    def _parse_color(flag: str | None) -> str:
+        if not flag:
+            return 'white'
+        f = flag.strip()
+        if not f:
+            return 'white'
+        lf = f.lower()
+        # accept -#HEX or plain #HEX
+        if lf.startswith('-#'):
+            norm = _normalize_hex(f[1:])
+            return norm or 'white'
+        if lf.startswith('#'):
+            norm = _normalize_hex(f)
+            return norm or 'white'
+        # named color flag
+        return COLOR_FLAGS.get(lf, 'white')
+
     # /tag myself "tag" [color]
-    m = re.match(r'^\s*/tag\s+myself\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
+    m = re.match(r'^\s*/tag\s+myself\s+"([^"]+)"(?:\s+(\S+))?\s*$', txt, re.I)
     if m:
         raw_tag_text = m.group(1)
         tag_text, trimmed = _clamp_label(raw_tag_text)
-        color_flag = (m.group(2) or '').lower()
-        color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
+        color_flag = (m.group(2) or '').strip() or None
+        color = _parse_color(color_flag)
         if tag_text.strip().lower() in {"dev", "admin"}:
             await _alert(ws, "INFO", "That tag is reserved")
             return True
@@ -57,15 +94,15 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         return True
 
     # /tag "username" "tag" [color] (admin/promoted/dev only for tagging others)
-    m = re.match(r'^\s*/tag\s+"([^"]+)"\s+"([^"]+)"(?:\s+(\-\w+))?\s*$', txt, re.I)
+    m = re.match(r'^\s*/tag\s+"([^"]+)"\s+"([^"]+)"(?:\s+(\S+))?\s*$', txt, re.I)
     if m:
         is_admin = is_effective_admin(manager, sub)
         target_label = (m.group(1) or '').strip()
         raw_tag_text = m.group(2)
         tag_text, trimmed = _clamp_label(raw_tag_text)
-        color_flag = (m.group(3) or '').lower()
+        color_flag = (m.group(3) or '').strip() or None
         if not is_admin and target_label.lower() != "myself":
-            await _alert(ws, "INFO", 'You can only tag yourself. Use: /tag "myself" "tag" [color]')
+            await _alert(ws, "INFO", 'You can only tag yourself. Use: /tag "myself" "tag" [color or -#HEXCODE]')
             return True
         # Resolve target; support quoted "myself"
         if target_label.lower() == "myself":
@@ -88,7 +125,7 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         if (target in manager.tag_rejects) and (target.lower() != sub.lower()) and not _is_dev_user(manager, sub):
             await _alert(ws, "INFO", "User rejects being tagged by others")
             return True
-        color = COLOR_FLAGS.get(color_flag, 'orange') if color_flag else 'orange'
+        color = _parse_color(color_flag)
         if tag_text.strip().lower() in {"dev", "admin"}:
             await _alert(ws, "INFO", "That tag is reserved")
             return True
@@ -168,6 +205,10 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         manager.tag_rejects.discard(sub)
         await manager._user_list()
         await manager._system(f"{sub} accepts being tagged by others", store=False)
+        return True
+
+    if re.match(r'^\s*/tag', txt, re.I):
+        await _alert(ws, "INFO", 'Usage: /tag "myself" "tag" [color or -#HEXCODE] or /tag "username" "tag" [color or -#HEXCODE]')
         return True
 
     return False

@@ -124,7 +124,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const isAdmin = admins.includes(me) || role === "admin";
   // DEV (localhost) is superior: detect my DEV tag and treat as admin-equivalent on client
   const myTagVal = (tagsMap as any)[me];
-  const myTagObj = typeof myTagVal === 'string' ? { text: myTagVal, color: 'orange' } : (myTagVal || null);
+  const myTagObj = typeof myTagVal === 'string' ? { text: myTagVal, color: 'white' } : (myTagVal || null);
   const isDevMe = !!(myTagObj && ((myTagObj as any).special === 'dev' || (myTagObj as any).color === 'rainbow' || String((myTagObj as any).text || '').toUpperCase() === 'DEV'));
   const isAdminEffective = isAdmin || isDevMe;
   const full = (url: string) => (url.startsWith("/") ? location.origin + url : url);
@@ -164,7 +164,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   // Helper: map color name to Tailwind class
   const colorClass = useCallback((c?: string) => {
-    switch ((c || "orange").toLowerCase()) {
+    switch ((c || "white").toLowerCase()) {
       case "red": return "text-red-500";
       case "green": return "text-green-500";
       case "blue": return "text-blue-400";
@@ -182,7 +182,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       case "fuchsia": return "text-fuchsia-400";
       case "sky": return "text-sky-400";
       case "gray": return "text-gray-400";
-      default: return "text-orange-400";
+      default: return "text-white";
     }
   }, []);
 
@@ -907,7 +907,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         // let it through
       } else if (adminOnly.test(txt)) {
         if (/^\s*\/tag\b/i.test(txt)) {
-          showAlert('You can only tag yourself. Use: /tag "myself" "tag" [color]');
+          showAlert('You can only tag yourself. Use: /tag "myself" "tag" [named color like -red or hex like -#RRGGBB]');
         } else {
           showAlert('Only admin can use that command');
         }
@@ -932,9 +932,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         showAlert('Usage: /muteA minutes');
         return;
       }
-      if (/^\s*\/tag/i.test(txt) && !/^\s*\/tag\s+"[^"]+"\s+"[^"]+"(?:\s+\-\w+)?\s*$/i.test(txt)) {
-        showAlert('Usage: /tag "username" "tag" [-r|-g|-b|-p|-y|-w|-c|-purple|-violet|-indigo|-teal|-lime|-amber|-emerald|-fuchsia|-sky|-gray]');
-        return;
+      if (/^\s*\/tag/i.test(txt)) {
+        const ok = /^\s*\/tag\s+"[^"]+"\s+"[^"]+"(?:\s+(?:-\w+|-#[0-9a-fA-F]{3,8}|#[0-9a-fA-F]{3,8}))?\s*$/i.test(txt);
+        if (!ok) {
+          showAlert('Usage: /tag "username" "tag" [named color like -red or hex like -#RRGGBB]');
+          return;
+        }
       }
       if (/^\s*\/kick\b/i.test(txt) && !/^\s*\/kick\s+"[^"]+"\s*$/i.test(txt)) {
         showAlert('Usage: /kick "username"');
@@ -1393,7 +1396,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const shouldFlash = !mine && mentionedCurrentUser && !!flashMap[m.id];
                 const alignRight = mine;
                 const tagVal = (tagsMap as any)[m.sender];
-                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
+                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
                 return (
                   <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
                     <div
@@ -1415,10 +1418,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
-                                {tagObj && (
-                                  <span className={`${(tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
-                                )}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {tagObj && (() => {
+                                  const c = (tagObj as any).color as string | undefined;
+                                  const isDev = (tagObj as any).special === 'dev' || c === 'rainbow';
+                                  const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                                  if (isDev) return <span className={`dev-rainbow font-semibold`}> ({tagObj.text})</span>;
+                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({tagObj.text})</span>;
+                                  return <span className={`${colorClass(c)} font-semibold`}> ({tagObj.text})</span>;
+                                })()}
                               </>
                             )}
                           </span>
@@ -1528,7 +1536,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const alignRight = mine; // keep AI spinner on the left
                 // resolve tag for sender
                 const tagVal = (tagsMap as any)[m.sender];
-                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
+                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
                 return (
                   <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
                     <div
@@ -1550,10 +1558,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
-                                {tagObj && (
-                                  <span className={`${(tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({(tagObj as any).text})</span>
-                                )}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {tagObj && (() => {
+                                  const c = (tagObj as any).color as string | undefined;
+                                  const isDev = (tagObj as any).special === 'dev' || c === 'rainbow';
+                                  const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                                  if (isDev) return <span className={`dev-rainbow font-semibold`}> ({(tagObj as any).text})</span>;
+                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({(tagObj as any).text})</span>;
+                                  return <span className={`${colorClass(c)} font-semibold`}> ({(tagObj as any).text})</span>;
+                                })()}
                               </>
                             )}
                           </span>
@@ -1667,10 +1680,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const mine = m.sender === me;
                 const first = i === 0 || messages[i - 1].sender !== m.sender;
                 // Only show delete if it's my own message or I'm admin/dev (Main)
-                const tagVal = (tagsMap as any)[m.sender];
-                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
-                const isDevSender = !!(tagObj && ((tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' || String((tagObj as any).text || '').toUpperCase() === 'DEV'));
-                const canDelete = mine || (isAdminEffective && !isDevSender);
+                const canDelete = mine || isAdminEffective;
                 const mime = m.mime || "";
                 const isImage = typeof mime === "string" && mime.startsWith("image");
                 const isVideo = typeof mime === "string" && mime.startsWith("video");
@@ -1683,6 +1693,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const mentionedCurrentUser = (m.type === "message" || m.type === "media") && mentionsMe(m.text || "");
                 const shouldFlash = !mine && mentionedCurrentUser && !!flashMap[m.id];
                 const alignRight = mine; // keep AI spinner on the left
+                const tagVal = (tagsMap as any)[m.sender];
+                const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
                 return (
                   <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
                     <div
@@ -1704,10 +1716,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
-                                {tagObj && (
-                                  <span className={`${(tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
-                                )}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {tagObj && (() => {
+                                  const c = (tagObj as any).color as string | undefined;
+                                  const isDev = (tagObj as any).special === 'dev' || c === 'rainbow';
+                                  const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                                  if (isDev) return <span className={`dev-rainbow font-semibold`}> ({tagObj.text})</span>;
+                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({tagObj.text})</span>;
+                                  return <span className={`${colorClass(c)} font-semibold`}> ({tagObj.text})</span>;
+                                })()}
                               </>
                             )}
                           </span>

@@ -22,7 +22,7 @@ export interface SidebarProps {
 }
 
 function colorClass(c?: string) {
-  switch ((c || "orange").toLowerCase()) {
+  switch ((c || "white").toLowerCase()) {
     case "red": return "text-red-500";
     case "green": return "text-green-500";
     case "blue": return "text-blue-400";
@@ -40,7 +40,7 @@ function colorClass(c?: string) {
     case "fuchsia": return "text-fuchsia-400";
     case "sky": return "text-sky-400";
     case "gray": return "text-gray-400";
-    default: return "text-orange-400";
+    default: return "text-white";
   }
 }
 
@@ -89,7 +89,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
             const selected = activeDm === u;
             const dmCount = unreadDm[u] || 0;
             const tagVal = (tags as any)[u];
-            const tagObj = typeof tagVal === 'string' ? { textq: tagVal, color: 'orange' } : (tagVal || null);
+            const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
             const isDev = !!(tagObj && ((tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow'));
             // NEW: activity indicator
             const isActive = userActivity && userActivity[u];
@@ -110,9 +110,13 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
                     <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}>
                       {u}
                       {isAdminUser && !isDev && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
-                      {tagObj && (
-                        <span className={`${isDev ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
-                      )}
+                      {tagObj && (() => {
+                        const c = (tagObj as any).color as string | undefined;
+                        const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                        if (isDev) return <span className={`dev-rainbow font-semibold`}> ({tagObj.text})</span>;
+                        if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({tagObj.text})</span>;
+                        return <span className={`${colorClass(c)} font-semibold`}> ({tagObj.text})</span>;
+                      })()}
                     </span>
                     <div className="absolute right-2 top-1/2 -translate-y-1/2">
                       {dmCount > 0 && (

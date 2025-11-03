@@ -69,7 +69,7 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
   const shouldFlash = !mine && mentionedCurrentUser && !!flashMap[m.id];
   const alignRight = mine; // keep AI spinner on the left
   const tagVal = (tagsMap as any)[m.sender];
-  const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'orange' } : (tagVal || null);
+  const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
 
   return (
     <div className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first ? "mt-3" : ""} mb-2`}>
@@ -98,9 +98,14 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
                     const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV'));
                     return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null;
                   })()}
-                  {tagObj && (
-                    <span className={`${(tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow' ? 'dev-rainbow' : colorClass((tagObj as any).color)} font-semibold`}> ({tagObj.text})</span>
-                  )}
+                  {tagObj && (() => {
+                    const c = (tagObj as any).color as string | undefined;
+                    const isDev = (tagObj as any).special === 'dev' || c === 'rainbow';
+                    const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                    if (isDev) return <span className={`dev-rainbow font-semibold`}> ({tagObj.text})</span>;
+                    if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({tagObj.text})</span>;
+                    return <span className={`${colorClass(c)} font-semibold`}> ({tagObj.text})</span>;
+                  })()}
                 </>
               )}
             </span>
