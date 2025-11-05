@@ -147,7 +147,14 @@ async def ws_handler(ws: WebSocket, token: str):
         return
 
     ip = ws.client.host
-    # Update last known IP for this username
+    # Enforce persistent identity: bind username to uid for this IP and block reserved names
+    ok_uid, uid, err = manager.ensure_user_identity(ip, sub)
+    if not ok_uid:
+        await ws.accept()
+        await ws.send_text(json.dumps({"type": "alert", "code": "USERNAME_TAKEN", "text": "Username is reserved for another user"}))
+        await ws.close()
+        return
+    # Update last known IP for this username (legacy per-username mapping)
     manager.user_ips[sub] = ip
 
     # Reject duplicate usernames (already connected)
@@ -435,22 +442,42 @@ async def ws_handler(ws: WebSocket, token: str):
 
             # --- GC thread handling ---
             if data.get("thread") == "gc" and isinstance(data.get("gcid"), str):
+                gid = data.get("gcid").strip()
                 # Detect join/leave events and broadcast system messages
-                if txt == "/join" and not manager.user_in_gc(gid, sub):
+                if txt == "/join" and gid and not manager.user_in_gc(gid, sub):
                     manager.add_user_to_gc(gid, sub)
                     ts = datetime.utcnow().isoformat() + "Z"
                     sysmsg = {"id": f"sys-{int(datetime.utcnow().timestamp()*1000)}", "type": "system", "sender": "SYSTEM", "timestamp": ts, "text": f"{sub} joined the group"}
                     await manager._broadcast_gc(gid, sysmsg)
                     continue
-                if txt == "/leave" and manager.user_in_gc(gid, sub):
+                if txt == "/leave" and gid and manager.user_in_gc(gid, sub):
                     manager.remove_user_from_gc(gid, sub)
                     ts = datetime.utcnow().isoformat() + "Z"
                     sysmsg = {"id": f"sys-{int(datetime.utcnow().timestamp()*1000)}", "type": "system", "sender": "SYSTEM", "timestamp": ts, "text": f"{sub} left the group"}
                     await manager._broadcast_gc(gid, sysmsg)
                     continue
-                gid = data.get("gcid").strip()
                 if not gid or not manager.user_in_gc(gid, sub):
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not in this group chat"}))
+                    continue
+                # Route tag/admin/moderation commands within GC as in Main/DM
+                if txt.startswith('/'):
+                    handled = False
+                    # Public tag commands
+                    if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
+                        if await handle_tag_commands(manager, ws, sub, role, txt):
+                            handled = True
+                    # Admin/dev commands
+                    if not handled and _is_effective_admin(manager, sub):
+                        if await handle_admin_commands(manager, ws, sub, role, txt):
+                            handled = True
+                        elif await handle_moderation_commands(manager, ws, sub, role, txt):
+                            handled = True
+                        elif await handle_tag_commands(manager, ws, sub, role, txt):
+                            handled = True
+                    if handled:
+                        continue
+                    # Unknown slash in GC -> invalid command
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Invalid command"}))
                     continue
                 # Commands in GC
                 if txt == "/clear":
@@ -476,12 +503,43 @@ async def ws_handler(ws: WebSocket, token: str):
                     except Exception:
                         pass
                     continue
-                # Delete a message in GC: allow author or creator
+                # Delete a message in GC
                 m_del_gc = re.match(r'^\s*/delete\s+(\S+)\s*$', txt, re.I)
                 if m_del_gc:
                     msg_id = m_del_gc.group(1)
-                    ok = manager.delete_gc_message(gid, msg_id, requester=sub, allow_creator=True)
-                    if ok:
+                    
+                    # Find message and check permissions
+                    gc = manager.gcs.get(gid)
+                    if not gc: continue
+                    target_msg = next((m for m in gc.get("history", []) if m.get("id") == msg_id), None)
+                    if not target_msg:
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "message not found"}))
+                        continue
+
+                    owner = target_msg.get("sender")
+                    is_requester_dev = _is_dev(manager, sub)
+                    is_requester_admin = _is_effective_admin(manager, sub)
+                    is_owner_dev = _is_dev(manager, owner)
+                    is_owner_admin = _is_effective_admin(manager, owner)
+                    is_requester_creator = gc.get("creator") == sub
+
+                    can_delete = False
+                    if is_requester_dev:
+                        can_delete = True
+                    elif is_requester_admin:
+                        if owner == sub or (not is_owner_admin and not is_owner_dev):
+                            can_delete = True
+                    elif is_requester_creator and owner != sub: # Creator can delete others' messages unless they are admin/dev
+                        if not is_owner_admin and not is_owner_dev:
+                            can_delete = True
+                    elif owner == sub:
+                        can_delete = True
+
+                    if not can_delete:
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not allowed"}))
+                        continue
+
+                    if manager.delete_gc_message(gid, msg_id, requester=sub, allow_any=True):
                         await manager._broadcast_gc_update(gid, {"type": "delete", "id": msg_id, "thread": "gc"})
                     continue
                 # Creation prompt
@@ -562,9 +620,6 @@ async def ws_handler(ws: WebSocket, token: str):
                 # Normal GC send
                 ts = now.isoformat() + "Z"
                 if data.get("text"):
-                    if txt.startswith('/'):
-                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Invalid command"}))
-                        continue
                     if manager.is_muted(sub):
                         await ws.send_text(json.dumps({
                             "type": "alert",
@@ -749,7 +804,25 @@ async def ws_handler(ws: WebSocket, token: str):
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "message not found"}))
                     continue
                 owner = target_msg.get("sender")
-                if owner != sub and not _is_effective_admin(manager, sub):
+                # Deletion permission logic:
+                # 1. DEV can delete anything.
+                # 2. Admin can delete their own messages or any non-admin/non-DEV user's message.
+                # 3. Users can only delete their own messages.
+                is_requester_dev = _is_dev(manager, sub)
+                is_requester_admin = _is_effective_admin(manager, sub)
+                is_owner_dev = _is_dev(manager, owner)
+                is_owner_admin = _is_effective_admin(manager, owner)
+
+                can_delete = False
+                if is_requester_dev:
+                    can_delete = True
+                elif is_requester_admin:
+                    if owner == sub or (not is_owner_admin and not is_owner_dev):
+                        can_delete = True
+                elif owner == sub:
+                    can_delete = True
+
+                if not can_delete:
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not allowed"}))
                     continue
                 if manager.delete_main_message(msg_id):

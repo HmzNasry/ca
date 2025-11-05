@@ -47,6 +47,23 @@ async def handle_moderation_commands(manager: ConnMgr, ws, sub: str, role: str, 
         await manager._system(f"{target} was unmuted", store=False)
         return True
 
+    # /unmute (no args) -> prompt list of currently muted users (admin/dev only)
+    if re.match(r'^\s*/unmute\s*$', txt, re.I) and is_adminish:
+        try:
+            muted = []
+            # collect users with active mutes
+            for u in list((manager.mutes or {}).keys()):
+                if manager.is_muted(u):
+                    muted.append(u)
+            muted.sort()
+        except Exception:
+            muted = []
+        if not muted:
+            await _alert(ws, "INFO", "Nobody is muted")
+            return True
+        await ws.send_text(json.dumps({"type": "unmute_prompt", "muted": muted}))
+        return True
+
     # /locktag "user" (DEV only)
     m = re.match(r'^\s*/locktag\s+"([^"]+)"\s*$', txt, re.I)
     if m:

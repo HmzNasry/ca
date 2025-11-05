@@ -11,8 +11,20 @@ import EmojiPanel from "./EmojiPanel";
 import AttachmentPreview from "./AttachmentPreview";
 import CreateGcModal from "./modals/CreateGcModal";
 import GcSettingsModal from "./modals/GcSettingsModal";
+import TagModal from "./modals/TagModal";
+import KickBanModal from "./modals/KickBanModal";
+import UnbanModal from "./modals/UnbanModal";
+import AdminRoleModal from "./modals/AdminRoleModal";
+import ConfirmModal from "./modals/ConfirmModal";
+import MuteModal from "./modals/MuteModal";
+import UnmuteModal from "./modals/UnmuteModal";
+import RemoveTagModal from "./modals/RemoveTagModal";
+import TagLockModal from "./modals/TagLockModal";
 import SpotifyPreview from "./SpotifyPreview";
 import YouTubePreview from "./YouTubePreview";
+import PsaModal from "./modals/PsaModal";
+import PassModal from "./modals/PassModal";
+import MuteAllModal from "./modals/MuteAllModal";
 
 export function ChatInterface({ token, onLogout }: { token: string; onLogout: () => void }) {
   
@@ -30,6 +42,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const [users, setUsers] = useState<string[]>([]);
   const [admins, setAdmins] = useState<string[]>([]);
   const [tagsMap, setTagsMap] = useState<Record<string, any>>({});
+  const [tagLocks, setTagLocks] = useState<Set<string>>(new Set());
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -57,6 +70,26 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const muteIntervalRef = useRef<number | null>(null);
   const [makeGcOpen, setMakeGcOpen] = useState(false);
   const [gcSettingsOpen, setGcSettingsOpen] = useState(false);
+  const [tagOpen, setTagOpen] = useState(false);
+  const [kickOpen, setKickOpen] = useState(false);
+  const [banOpen, setBanOpen] = useState(false);
+  const [adminRoleOpen, setAdminRoleOpen] = useState(false);
+  const [adminRoleMode, setAdminRoleMode] = useState<"mkadmin" | "rmadmin">("mkadmin");
+  const [purgeConfirmOpen, setPurgeConfirmOpen] = useState(false);
+  const [muteOpen, setMuteOpen] = useState(false);
+  const [unbanOpen, setUnbanOpen] = useState(false);
+  const [bannedList, setBannedList] = useState<string[]>([]);
+  const [unmuteOpen, setUnmuteOpen] = useState(false);
+  const [mutedList, setMutedList] = useState<string[]>([]);
+  const [rmtagOpen, setRmtagOpen] = useState(false);
+  const [lockOpen, setLockOpen] = useState(false);
+  const [unlockOpen, setUnlockOpen] = useState(false);
+  const [psaOpen, setPsaOpen] = useState(false);
+  const [passOpen, setPassOpen] = useState(false);
+  const [kickAllConfirm, setKickAllConfirm] = useState(false);
+  const [unmuteAllConfirm, setUnmuteAllConfirm] = useState(false);
+  const [muteAllOpen, setMuteAllOpen] = useState(false);
+  const [clearMainConfirm, setClearMainConfirm] = useState(false);
 
   const ws = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -431,6 +464,18 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         setGcs(d.gcs as GC[]);
         return;
       }
+      // Unban prompt from server
+      if (d.type === "unban_prompt" && Array.isArray(d.banned)) {
+        setBannedList(d.banned);
+        setUnbanOpen(true);
+        return;
+      }
+      // Unmute prompt from server
+      if (d.type === "unmute_prompt" && Array.isArray(d.muted)) {
+        setMutedList(d.muted);
+        setUnmuteOpen(true);
+        return;
+      }
       if (d.type === "gc_prompt") {
         setMakeGcOpen(true);
         return;
@@ -763,6 +808,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         if (d.user_activity && typeof d.user_activity === "object") {
           setUserActivity(d.user_activity);
         }
+        if (Array.isArray(d.tag_locks)) {
+          setTagLocks(new Set(d.tag_locks));
+        }
         return;
       }
 
@@ -899,6 +947,161 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       return;
     }
 
+    // Interactive shortcuts based on incomplete commands
+    // /tag: if not fully specified, open modal
+    if (/^\s*\/tag\b/i.test(txt)) {
+      const okFull = /^\s*\/tag\s+"[^"]+"\s+"[^"]+"(?:\s+(?:-\w+|-#[0-9a-fA-F]{3,8}|#[0-9a-fA-F]{3,8}))?\s*$/i.test(txt);
+      if (!okFull) {
+        // If normal user and their tag is locked, do not open modal; show alert instead
+        if (!isAdminEffective && tagLocks.has(me)) {
+          showAlert("Your tag is locked (DEV only)");
+          setInput("");
+          return;
+        }
+        setTagOpen(true);
+        setInput("");
+        return;
+      }
+    }
+
+    // Admin flows
+    if (isAdminEffective) {
+      // /kick: open modal if no user specified
+      if (/^\s*\/kick\b/i.test(txt)) {
+        const okFull = /^\s*\/kick\s+"[^"]+"\s*$/i.test(txt);
+        if (!okFull) {
+          setKickOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      // /clear in Main: confirm
+      if (/^\s*\/clear\s*$/i.test(txt) && !activeDmRef.current && !activeGcRef.current) {
+        setClearMainConfirm(true);
+        setInput("");
+        return;
+      }
+      // /ban: open modal if no user specified
+      if (/^\s*\/ban\b/i.test(txt)) {
+        const okFull = /^\s*\/ban\s+"[^"]+"\s*$/i.test(txt);
+        if (!okFull) {
+          setBanOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      // /unban: if no username specified, request banned list (server will reply with unban_prompt)
+      if (/^\s*\/unban\b/i.test(txt)) {
+        const okFull = /^\s*\/unban\s+"[^"]+"\s*$/i.test(txt);
+        if (!okFull) {
+          try { ws.current?.send(JSON.stringify({ text: '/unban' })); } catch {}
+          setInput("");
+          return;
+        }
+      }
+      // /pass: open modal if missing args
+      if (/^\s*\/pass\b/i.test(txt)) {
+        const okFull = /^\s*\/pass\s+"[^"]+"\s*$/i.test(txt);
+        if (!okFull) {
+          setPassOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      // /unmute: if no username specified, request muted list (server will reply with unmute_prompt)
+      if (/^\s*\/unmute\b/i.test(txt)) {
+        const okFull = /^\s*\/unmute\s+"[^"]+"\s*$/i.test(txt);
+        if (!okFull) {
+          try { ws.current?.send(JSON.stringify({ text: '/unmute' })); } catch {}
+          setInput("");
+          return;
+        }
+      }
+      // /mute: open modal if missing args
+      if (/^\s*\/mute\b/i.test(txt)) {
+        const okFull = /^\s*\/mute\s+(?:"[^"]+"|\S+)\s+\d+\s*$/i.test(txt);
+        if (!okFull) {
+          setMuteOpen(true);
+          setInput("");
+          return;
+        }
+      }
+  // DEV-only: /mkadmin and /rmadmin without args -> modal
+      if (isDevMe && /^\s*\/mkadmin\b/i.test(txt)) {
+        const okFull = /^\s*\/mkadmin\s+"[^"]+"\s+\S+\s*$/i.test(txt);
+        if (!okFull) {
+          setAdminRoleMode("mkadmin");
+          setAdminRoleOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      if (isDevMe && /^\s*\/rmadmin\b/i.test(txt)) {
+        const okFull = /^\s*\/rmadmin\s+"[^"]+"\s+\S+\s*$/i.test(txt);
+        if (!okFull) {
+          setAdminRoleMode("rmadmin");
+          setAdminRoleOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      // DEV-only: /locktag and /unlocktag without args -> open modal
+      if (isDevMe && /^\s*\/locktag\b/i.test(txt)) {
+        const okFull = /^\s*\/locktag\s+(?:"[^"]+"|\S+)\s*$/i.test(txt);
+        if (!okFull) {
+          setLockOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      if (isDevMe && /^\s*\/unlocktag\b/i.test(txt)) {
+        const okFull = /^\s*\/unlocktag\s+(?:"[^"]+"|\S+)\s*$/i.test(txt);
+        if (!okFull) {
+          setUnlockOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      // DEV-only: /psa without args -> modal
+      if (isDevMe && /^\s*\/psa\b/i.test(txt)) {
+        const okFull = /^\s*\/psa\s+"[^"]+"\s*$/i.test(txt);
+        if (!okFull) {
+          setPsaOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      // DEV-only: /kickA, /muteA, /unmuteA helpers
+      if (isDevMe && /^\s*\/kickA\b/i.test(txt)) {
+        setKickAllConfirm(true);
+        setInput("");
+        return;
+      }
+      if (isDevMe && /^\s*\/muteA\b/i.test(txt)) {
+        const okFull = /^\s*\/muteA\s+\d+\s*$/i.test(txt);
+        if (!okFull) {
+          setMuteAllOpen(true);
+          setInput("");
+          return;
+        }
+      }
+      if (isDevMe && /^\s*\/unmuteA\b/i.test(txt)) {
+        setUnmuteAllConfirm(true);
+        setInput("");
+        return;
+      }
+    }
+
+    // /rmtag: if not fully specified, open modal (available to everyone; admins can pick others)
+    if (/^\s*\/rmtag\b/i.test(txt)) {
+      const okFull = /^\s*\/rmtag\s+"[^"]+"\s*$/i.test(txt);
+      if (!okFull) {
+        setRmtagOpen(true);
+        setInput("");
+        return;
+      }
+    }
+
     // Intercept admin-only commands for non-admins and show modal instead of sending
     if (!isAdminEffective) {
   const adminOnly = /^(\/kick|\/ban|\/unban|\/clear|\/pass|\/mute|\/unmute|\/kickA|\/mkadmin|\/rmadmin|\/locktag|\/unlocktag|\/purgeadmin|\/muteA|\/unmuteA|\/psa)(?:\s|$)/i;
@@ -932,13 +1135,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         showAlert('Usage: /muteA minutes');
         return;
       }
-      if (/^\s*\/tag/i.test(txt)) {
-        const ok = /^\s*\/tag\s+"[^"]+"\s+"[^"]+"(?:\s+(?:-\w+|-#[0-9a-fA-F]{3,8}|#[0-9a-fA-F]{3,8}))?\s*$/i.test(txt);
-        if (!ok) {
-          showAlert('Usage: /tag "username" "tag" [named color like -red or hex like -#RRGGBB]');
-          return;
-        }
-      }
+      // /tag handled above: if incomplete, modal is opened. If it reaches here, it is full and allowed.
       if (/^\s*\/kick\b/i.test(txt) && !/^\s*\/kick\s+"[^"]+"\s*$/i.test(txt)) {
         showAlert('Usage: /kick "username"');
         return;
@@ -951,17 +1148,13 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         showAlert('Usage: /ban "username"');
         return;
       }
-      if (/^\s*\/unban/i.test(txt) && !/^\s*\/unban\s+"[^"]+"\s*$/i.test(txt)) {
-        showAlert('Usage: /unban "username"');
-        return;
-      }
+      // /unban usage check not needed here; incomplete form is handled above by prompting
       if (/^\s*\/mkadmin/i.test(txt) && !/^\s*\/mkadmin\s+"[^"]+"\s+\S+\s*$/i.test(txt)) {
-        showAlert('Usage: /mkadmin "username" superpass');
-        return;
+        // If DEV and no args: handled by modal before; otherwise show usage
+        if (!isDevMe) { showAlert('Usage: /mkadmin "username" superpass'); return; }
       }
       if (/^\s*\/rmadmin/i.test(txt) && !/^\s*\/rmadmin\s+"[^"]+"\s+\S+\s*$/i.test(txt)) {
-        showAlert('Usage: /rmadmin "username" superpass');
-        return;
+        if (!isDevMe) { showAlert('Usage: /rmadmin "username" superpass'); return; }
       }
       if (/^\s*\/locktag/i.test(txt) && !/^\s*\/locktag\s+(?:"[^"]+"|\S+)\s*$/i.test(txt)) {
         showAlert('Usage: /locktag "username"');
@@ -1280,6 +1473,186 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
   {/* Modals */}
   <CreateGcModal open={makeGcOpen} me={me} users={users} onClose={() => setMakeGcOpen(false)} onCreate={createGc} />
+  <TagModal
+    open={tagOpen}
+    me={me}
+    users={users}
+    admins={admins}
+    tagsMap={tagsMap}
+    tagLocks={Array.from(tagLocks)}
+    isAdminEffective={isAdminEffective}
+    onClose={() => setTagOpen(false)}
+    onSubmit={(target: string, label: string, hex: string) => {
+      try {
+        const hexFlag = hex ? ` -#${hex.replace(/^#/,'')}` : '';
+        const who = (!isAdminEffective || target === me) ? 'myself' : target;
+        const cmd = `/tag "${who}" "${label}"${hexFlag}`;
+        const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {});
+        ws.current?.send(JSON.stringify({ text: cmd, ...threadPayload }));
+      } catch {}
+    }}
+  />
+  {/* Admin: Kick/Ban modals */}
+  <KickBanModal
+    open={kickOpen}
+    me={me}
+    users={users}
+    admins={admins}
+    tagsMap={tagsMap}
+    isDevEffective={isDevMe}
+    mode="kick"
+    onClose={() => setKickOpen(false)}
+    onSubmit={(sel: string[]) => {
+      try {
+        sel.forEach(u => ws.current?.send(JSON.stringify({ text: `/kick "${u}"` })));
+      } catch {}
+    }}
+  />
+  <UnbanModal
+    open={unbanOpen}
+    banned={bannedList}
+    onClose={() => setUnbanOpen(false)}
+    onSubmit={(sel: string[]) => {
+      try {
+        sel.forEach(u => ws.current?.send(JSON.stringify({ text: `/unban "${u}"` })));
+      } catch {}
+    }}
+  />
+  <KickBanModal
+    open={banOpen}
+    me={me}
+    users={users}
+    admins={admins}
+    tagsMap={tagsMap}
+    isDevEffective={isDevMe}
+    mode="ban"
+    onClose={() => setBanOpen(false)}
+    onSubmit={(sel: string[]) => {
+      try {
+        sel.forEach(u => ws.current?.send(JSON.stringify({ text: `/ban "${u}"` })));
+      } catch {}
+    }}
+  />
+  {/* DEV: Admin role modal with purge */}
+  <AdminRoleModal
+    open={adminRoleOpen}
+    me={me}
+    users={users}
+    admins={admins}
+    tagsMap={tagsMap}
+    mode={adminRoleMode}
+    showPurge={isDevMe}
+    onClose={() => setAdminRoleOpen(false)}
+    onSubmit={(user: string, sp: string) => {
+      try {
+        const cmd = adminRoleMode === 'mkadmin' ? `/mkadmin "${user}" ${sp}` : `/rmadmin "${user}" ${sp}`;
+        ws.current?.send(JSON.stringify({ text: cmd }));
+      } catch {}
+    }}
+    onPurgeAdmins={() => setPurgeConfirmOpen(true)}
+  />
+  <MuteModal
+    open={muteOpen}
+    me={me}
+    users={users}
+    admins={admins}
+    tagsMap={tagsMap}
+    isDevEffective={isDevMe}
+    onClose={() => setMuteOpen(false)}
+    onSubmit={(sel: string[], mins: number) => {
+      try {
+        sel.forEach(u => ws.current?.send(JSON.stringify({ text: `/mute "${u}" ${mins}` })));
+      } catch {}
+    }}
+  />
+  <UnmuteModal
+    open={unmuteOpen}
+    muted={mutedList}
+    onClose={() => setUnmuteOpen(false)}
+    onSubmit={(sel: string[]) => {
+      try { sel.forEach(u => ws.current?.send(JSON.stringify({ text: `/unmute "${u}"` }))); } catch {}
+    }}
+  />
+  <RemoveTagModal
+    open={rmtagOpen}
+    me={me}
+    users={users}
+    tagsMap={tagsMap}
+    isAdminEffective={isAdminEffective}
+    isDevEffective={isDevMe}
+    tagLocks={Array.from(tagLocks)}
+    onClose={() => setRmtagOpen(false)}
+    onSubmit={(sel: string[]) => {
+      try { sel.forEach(u => ws.current?.send(JSON.stringify({ text: `/rmtag "${u}"` }))); } catch {}
+    }}
+  />
+  <TagLockModal
+    open={lockOpen}
+    mode="lock"
+    users={users}
+    tagLocks={Array.from(tagLocks)}
+    onClose={() => setLockOpen(false)}
+    onSubmit={(sel: string[]) => {
+      try { sel.forEach(u => ws.current?.send(JSON.stringify({ text: `/locktag "${u}"` }))); } catch {}
+    }}
+  />
+  <TagLockModal
+    open={unlockOpen}
+    mode="unlock"
+    users={users}
+    tagLocks={Array.from(tagLocks)}
+    onClose={() => setUnlockOpen(false)}
+    onSubmit={(sel: string[]) => {
+      try { sel.forEach(u => ws.current?.send(JSON.stringify({ text: `/unlocktag "${u}"` }))); } catch {}
+    }}
+  />
+  <ConfirmModal
+    open={purgeConfirmOpen}
+    title="Are you sure?"
+    body="This will demote all admins."
+    onCancel={() => setPurgeConfirmOpen(false)}
+    onOk={() => {
+      try { ws.current?.send(JSON.stringify({ text: '/purgeadmin' })); } catch {}
+      setPurgeConfirmOpen(false);
+    }}
+  />
+  <ConfirmModal
+    open={clearMainConfirm}
+    title="Clear main chat?"
+    body="This will remove all messages from Main for everyone."
+    onCancel={() => setClearMainConfirm(false)}
+    onOk={() => { try { ws.current?.send(JSON.stringify({ text: '/clear' })); } catch {} setClearMainConfirm(false); }}
+  />
+  {/* DEV-only utilities */}
+  <PsaModal
+    open={psaOpen}
+    onClose={() => setPsaOpen(false)}
+    onSubmit={(msg: string) => { try { ws.current?.send(JSON.stringify({ text: `/psa "${msg}"` })); } catch {} }}
+  />
+  <PassModal
+    open={passOpen}
+    onClose={() => setPassOpen(false)}
+    onSubmit={(p: string) => { try { ws.current?.send(JSON.stringify({ text: `/pass "${p}"` })); } catch {} }}
+  />
+  <ConfirmModal
+    open={kickAllConfirm}
+    title="Kick everyone?"
+    body="This will force-disconnect all users except you."
+    onCancel={() => setKickAllConfirm(false)}
+    onOk={() => { try { ws.current?.send(JSON.stringify({ text: '/kickA' })); } catch {} setKickAllConfirm(false); }}
+  />
+  <MuteAllModal
+    open={muteAllOpen}
+    onClose={() => setMuteAllOpen(false)}
+    onSubmit={(n: number) => { try { ws.current?.send(JSON.stringify({ text: `/muteA ${n}` })); } catch {} }}
+  />
+  <ConfirmModal
+    open={unmuteAllConfirm}
+    title="Unmute everyone?"
+    body="This will lift all mutes immediately."
+    onCancel={() => setUnmuteAllConfirm(false)}
+    onOk={() => { try { ws.current?.send(JSON.stringify({ text: '/unmuteA' })); } catch {} setUnmuteAllConfirm(false); }}
+  />
   <GcSettingsModal
     open={gcSettingsOpen}
     me={me}
@@ -1288,6 +1661,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     onClose={() => setGcSettingsOpen(false)}
     onSave={(name, members) => {
       if (!activeGc) return;
+      // Optimistic update: reflect new name immediately in UI
+      setGcs(prev => prev.map(gc => gc.id === activeGc ? { ...gc, name } : gc));
       try { ws.current?.send(JSON.stringify({ type: 'update_gc', gcid: activeGc, name, members })); } catch {}
     }}
     onDelete={() => { if (activeGc) { try { ws.current?.send(JSON.stringify({ type: 'delete_gc', gcid: activeGc })); } catch {} setGcSettingsOpen(false); } }}

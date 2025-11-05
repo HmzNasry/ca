@@ -35,6 +35,18 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             await _alert(ws, "INFO", "invalid superpass")
             return True
         manager.promoted_admins.add(target)
+        # Persist to admins.json and remove from admin blacklist if present
+        try:
+            ws_t = manager.active.get(target)
+            ip_t = None
+            if ws_t and getattr(ws_t, 'client', None):
+                ip_t = getattr(ws_t.client, 'host', None)
+            if not ip_t:
+                ip_t = manager.user_ips.get(target)
+            manager.add_persistent_admin(target, ip_t)
+            manager.remove_admin_blacklist(target)
+        except Exception:
+            pass
         await manager._system(f"{target} was granted admin", store=False)
         await manager._user_list()
         return True
@@ -54,6 +66,22 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             return True
         manager.promoted_admins.discard(target)
         manager.demoted_admins.add(target)
+        # Track by last-seen IP too, to prevent re-admin by rename + admin pass; persist to blacklist
+        try:
+            # Prefer live socket IP; fall back to last recorded IP
+            ws_t = manager.active.get(target)
+            ip_t = None
+            if ws_t and getattr(ws_t, 'client', None):
+                ip_t = getattr(ws_t.client, 'host', None)
+            if not ip_t:
+                ip_t = manager.user_ips.get(target)
+            if ip_t:
+                manager.demoted_admin_ips.add(ip_t)
+            # Persist updates
+            manager.remove_persistent_admin(target)
+            manager.add_admin_blacklist(target, ip_t)
+        except Exception:
+            pass
         await manager._system(f"{target} was demoted from admin", store=False)
         await manager._user_list()
         return True
@@ -108,6 +136,18 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         for u, r in list(manager.roles.items()):
             if r == 'admin' and not is_dev(manager, u):
                 manager.demoted_admins.add(u)
+                # Track by IP as well for persistence across sessions
+                try:
+                    ws_u = manager.active.get(u)
+                    ip_u = None
+                    if ws_u and getattr(ws_u, 'client', None):
+                        ip_u = getattr(ws_u.client, 'host', None)
+                    if not ip_u:
+                        ip_u = manager.user_ips.get(u)
+                    if ip_u:
+                        manager.demoted_admin_ips.add(ip_u)
+                except Exception:
+                    pass
         # Remove ADMIN tags (but preserve DEV tag for actual devs)
         for u, tag in list(manager.tags.items()):
             if is_dev(manager, u):
@@ -196,6 +236,18 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         else:
             manager.ban_user(target)
             await manager._system(f"{target} (offline) was banned by admin", store=False)
+        return True
+
+    # /unban (no args) -> prompt banned list
+    if re.match(r'^\s*/unban\s*$', txt, re.I):
+        try:
+            banned = sorted(list(manager.banned_users))
+        except Exception:
+            banned = []
+        if not banned:
+            await _alert(ws, "INFO", "Nobody is banned")
+            return True
+        await ws.send_text(json.dumps({"type": "unban_prompt", "banned": banned}))
         return True
 
     # /unban "username"

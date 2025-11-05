@@ -1,0 +1,20 @@
+{
+  "users": {
+    "3ad5e73d8061483db8ed0f41fa3d115d": {
+      "username": "test",
+      "ips": [
+        "127.0.0.1"
+      ]
+    },
+    "00a7768a54dc4d79b283dd08e4ab78dd": {
+      "username": "test999",
+      "ips": [
+        "2600:100f:a022:ce51:d914:7c8c:a83c:2bca"
+      ]
+    }
+  },
+  "ip_to_uid": {
+    "127.0.0.1": "3ad5e73d8061483db8ed0f41fa3d115d",
+    "2600:100f:a022:ce51:d914:7c8c:a83c:2bca": "00a7768a54dc4d79b283dd08e4ab78dd"
+  }
+}

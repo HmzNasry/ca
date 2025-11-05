@@ -57,7 +57,7 @@ sed -i "s|https://[a-zA-Z0-9-]*\.trycloudflare\.com|$TUNNEL_URL|g" index.html
 export GIT_SSH_COMMAND="ssh -i /home/hzr/.ssh/id_rsa -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
 eval $(ssh-agent -s)
 ssh-add /home/hzr/.ssh/id_rsa
-git config --global --add safe.directory /data/chatapp/chatlink
+git config --add safe.directory /data/chatapp/chatlink
 
 # Fetch the latest changes from the remote
 echo -e "${YELLOW}Fetching latest changes from remote...${NC}"
@@ -78,8 +78,6 @@ git reset --hard origin/master || {
 # Update the HTML file again (in case remote had changes)
 sed -i "s|https://[a-zA-Z0-9-]*\.trycloudflare\.com|$TUNNEL_URL|g" index.html
 
-git config --global user.email "chatapp@localhost"
-git config --global user.name "chatapp"
 # Commit and push changes
 echo -e "${YELLOW}Updating GitHub repository...${NC}"
 git add index.html

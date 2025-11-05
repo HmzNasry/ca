@@ -9,7 +9,7 @@ async def _alert(ws, code: str, text: str):
 def _is_dev_user(manager: ConnMgr, user: str) -> bool:
     return is_dev(manager, user)
 
-MAX_TAG_LABEL_LEN = 30
+MAX_TAG_LABEL_LEN = 60
 
 def _clamp_label(text: str) -> tuple[str, bool]:
     """Clamp tag label to MAX_TAG_LABEL_LEN, appending ellipsis if truncated.

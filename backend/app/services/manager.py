@@ -6,6 +6,10 @@ from fastapi import WebSocket
 HISTORY = 100
 BAN_FILE = os.path.join(os.path.dirname(__file__), "..", "banned.json")
 BAN_FILE = os.path.abspath(BAN_FILE)
+# Persistent admin allow/deny lists
+ADMIN_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "admins.json"))
+ADMIN_BLACKLIST_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "admin_blacklist.json"))
+USERS_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "users.json"))
 
 # Server-side limits
 MAX_GC_NAME_LEN = 20
@@ -43,7 +47,9 @@ class ConnMgr:
         # moderation/admin & roles
         self.roles: Dict[str, str] = {}  # username -> role (e.g., 'admin' or 'user')
         self.promoted_admins: set[str] = set()  # runtime-granted admins
-        self.demoted_admins: set[str] = set()   # runtime-demoted built-in admins (session only)
+        self.demoted_admins: set[str] = set()   # runtime-demoted built-in admins (persists in-memory until mkadmin)
+        # Track demoted admin identities by last-seen IPs to prevent quick re-admin via rename
+        self.demoted_admin_ips: set[str] = set()
         # tagging
         self.tags: Dict[str, dict] = {}  # username -> { text: str, color: str }
         self.tag_rejects: set[str] = set()
@@ -58,11 +64,25 @@ class ConnMgr:
         self.banned_users: set[str] = set()
         self.banned_ips: set[str] = set()
         self._load_bans()
+        # admins persistence
+        self.persistent_admin_users: set[str] = set()
+        self.persistent_admin_ips: set[str] = set()
+        self._admin_user_ips: Dict[str, str] = {}
+        self._load_admins()
+        # blacklisted (demoted) admins persistence
+        self.admin_blacklist_users: set[str] = set()
+        self.admin_blacklist_ips: set[str] = set()
+        self._admin_blacklist_user_ips: Dict[str, str] = {}
+        self._load_admin_blacklist()
         # group chats (GCs) runtime store: id -> {name, creator, members:set[str], history:list[dict]}
         self.gcs = {}
         # User activity: username -> bool (True=active/on tab, False=inactive)
         self.user_activity: Dict[str, bool] = {}
         # No DB: start with empty history and groups
+        # users.json identity mapping
+        self._users = {"users": {}, "ip_to_uid": {}}
+        self._username_to_uid = {}
+        self._load_users()
 
     # --- DM helpers ---
     def dm_id(self, a: str, b: str) -> str:
@@ -349,17 +369,224 @@ class ConnMgr:
         except Exception as e:
             print("Failed to save ban list:", e)
 
+    # --- persistent admins (allow list) ---
+    def _load_admins(self):
+        if os.path.exists(ADMIN_FILE):
+            try:
+                with open(ADMIN_FILE, "r") as f:
+                    data = json.load(f)
+                    self.persistent_admin_users = set(data.get("users", []) or [])
+                    self.persistent_admin_ips = set(data.get("ips", []) or [])
+                    self._admin_user_ips = dict((data.get("user_ips", {}) or {}))
+            except Exception as e:
+                print("Failed to load admins:", e)
+
+    def _save_admins(self):
+        try:
+            # compose mapping from last seen ip (user_ips) but only for persisted admins we know
+            filtered_map = {}
+            for u in self.persistent_admin_users:
+                ip = self.user_ips.get(u) or self._admin_user_ips.get(u)
+                if ip:
+                    filtered_map[u] = ip
+            data = {
+                "users": list(self.persistent_admin_users),
+                "ips": list(self.persistent_admin_ips),
+                "user_ips": filtered_map,
+            }
+            with open(ADMIN_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print("Failed to save admins:", e)
+
+    # --- persistent admin blacklist ---
+    def _load_admin_blacklist(self):
+        if os.path.exists(ADMIN_BLACKLIST_FILE):
+            try:
+                with open(ADMIN_BLACKLIST_FILE, "r") as f:
+                    data = json.load(f)
+                    self.admin_blacklist_users = set(data.get("users", []) or [])
+                    self.admin_blacklist_ips = set(data.get("ips", []) or [])
+                    self._admin_blacklist_user_ips = dict((data.get("user_ips", {}) or {}))
+            except Exception as e:
+                print("Failed to load admin blacklist:", e)
+
+    def _save_admin_blacklist(self):
+        try:
+            filtered_map = {}
+            for u in self.admin_blacklist_users:
+                ip = self.user_ips.get(u) or self._admin_blacklist_user_ips.get(u)
+                if ip:
+                    filtered_map[u] = ip
+            data = {
+                "users": list(self.admin_blacklist_users),
+                "ips": list(self.admin_blacklist_ips),
+                "user_ips": filtered_map,
+            }
+            with open(ADMIN_BLACKLIST_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print("Failed to save admin blacklist:", e)
+
+    # --- users.json identity persistence ---
+    def _load_users(self):
+        try:
+            if os.path.exists(USERS_FILE):
+                with open(USERS_FILE, "r") as f:
+                    data = json.load(f) or {}
+                if not isinstance(data, dict):
+                    data = {}
+                self._users = {
+                    "users": dict(data.get("users", {})) if isinstance(data.get("users", {}), dict) else {},
+                    "ip_to_uid": dict(data.get("ip_to_uid", {})) if isinstance(data.get("ip_to_uid", {}), dict) else {},
+                }
+                # rebuild username -> uid index
+                self._username_to_uid = {}
+                for uid, meta in self._users.get("users", {}).items():
+                    uname = (meta or {}).get("username")
+                    if isinstance(uname, str) and uname:
+                        self._username_to_uid[uname] = uid
+        except Exception as e:
+            print("Failed to load users.json:", e)
+
+    def _save_users(self):
+        try:
+            # ensure username_to_uid can be reconstructed; we only persist users + ip_to_uid
+            with open(USERS_FILE, "w") as f:
+                json.dump(self._users, f, indent=2)
+        except Exception as e:
+            print("Failed to save users.json:", e)
+
+    def _get_or_create_uid_for_ip(self, ip: str | None) -> str:
+        if not ip:
+            # Generate a stable ephemeral uid for None IP
+            uid = self._users.get("ip_to_uid", {}).get("__none__")
+            if not uid:
+                uid = uuid.uuid4().hex
+                self._users.setdefault("users", {})[uid] = {"username": None, "ips": []}
+                self._users.setdefault("ip_to_uid", {})["__none__"] = uid
+                self._save_users()
+            return uid
+        uid = self._users.get("ip_to_uid", {}).get(ip)
+        if uid:
+            return uid
+        uid = uuid.uuid4().hex
+        self._users.setdefault("users", {})[uid] = {"username": None, "ips": [ip]}
+        self._users.setdefault("ip_to_uid", {})[ip] = uid
+        self._save_users()
+        return uid
+
+    def _associate_ip(self, uid: str, ip: str | None):
+        if ip is None:
+            return
+        self._users.setdefault("users", {}).setdefault(uid, {"username": None, "ips": []})
+        meta = self._users["users"][uid]
+        ips = meta.get("ips") or []
+        if ip not in ips:
+            ips.append(ip)
+            meta["ips"] = ips
+        self._users.setdefault("ip_to_uid", {})[ip] = uid
+        self._save_users()
+
+    def _get_uid_for_username(self, username: str | None) -> str | None:
+        if not username:
+            return None
+        return self._username_to_uid.get(username)
+
+    def _bind_username(self, uid: str, username: str) -> bool:
+        # Reserve username for this uid if not reserved by others
+        other = self._get_uid_for_username(username)
+        if other and other != uid:
+            return False
+        # Update mapping
+        self._users.setdefault("users", {}).setdefault(uid, {"username": None, "ips": []})
+        self._users["users"][uid]["username"] = username
+        # rebuild index
+        # First remove any old username mapping for this uid
+        to_delete = [u for u, _uid in self._username_to_uid.items() if _uid == uid and u != username]
+        for u in to_delete:
+            self._username_to_uid.pop(u, None)
+        self._username_to_uid[username] = uid
+        self._save_users()
+        return True
+
+    def ensure_user_identity(self, ip: str | None, username: str) -> tuple[bool, str | None, str | None]:
+        """Ensure a uid is assigned for this IP and bind the provided username if available.
+        Returns (ok, uid, error_message). When ok is False, uid may be None.
+        """
+        try:
+            uid = self._get_or_create_uid_for_ip(ip)
+            # Always associate this IP with the uid
+            self._associate_ip(uid, ip)
+            # If username is reserved by another uid, block
+            other = self._get_uid_for_username(username)
+            if other and other != uid:
+                return (False, None, "username is reserved")
+            # Bind username to this uid (updates username history)
+            ok = self._bind_username(uid, username)
+            if not ok:
+                return (False, None, "username is reserved")
+            return (True, uid, None)
+        except Exception as e:
+            return (False, None, "identity error")
+
+    def add_persistent_admin(self, user: str, ip: str | None = None):
+        if user:
+            self.persistent_admin_users.add(user)
+        if ip:
+            self.persistent_admin_ips.add(ip)
+            self.user_ips[user] = ip
+        self._save_admins()
+
+    def remove_persistent_admin(self, user: str):
+        if user in self.persistent_admin_users:
+            self.persistent_admin_users.discard(user)
+        # Do not remove IPs immediately to preserve audit trail; optional: purge stale IPs separately
+        self._save_admins()
+
+    def add_admin_blacklist(self, user: str, ip: str | None = None):
+        if user:
+            self.admin_blacklist_users.add(user)
+        if ip:
+            self.admin_blacklist_ips.add(ip)
+            self.user_ips[user] = ip
+        self._save_admin_blacklist()
+
+    def remove_admin_blacklist(self, user: str):
+        if user in self.admin_blacklist_users:
+            self.admin_blacklist_users.discard(user)
+        self._save_admin_blacklist()
+
     # --- connection logic ---
     async def connect(self, ws: WebSocket, user: str, role: str = "user"):
         self.active[user] = ws
-        # set/refresh role for this session
-        self.roles[user] = role or "user"
-        # If logging in as admin, it's a fresh session: clear any prior session demotion
-        if (role or "user") == "admin":
-            self.demoted_admins.discard(user)
-        # record latest IP for the user (in-memory); persist only for banned users
+        # Determine client IP up-front
+        ip = None
         try:
             ip = ws.client.host
+        except Exception:
+            ip = None
+        # Determine role with persistence and blacklist rules
+        incoming_role = (role or "user")
+        final_role = incoming_role
+        try:
+            # Blacklist check first: if blacklisted by user or IP, downgrade to user regardless
+            if (user in self.admin_blacklist_users) or (ip and ip in self.admin_blacklist_ips):
+                final_role = "user"
+            else:
+                # If they are in persistent admins (by user or IP), upgrade to admin
+                if (user in self.persistent_admin_users) or (ip and ip in self.persistent_admin_ips):
+                    final_role = "admin"
+                # If they logged in with admin pass and are not blacklisted, persist them as admin
+                elif incoming_role == "admin":
+                    self.add_persistent_admin(user, ip)
+                    final_role = "admin"
+        except Exception:
+            final_role = incoming_role
+        # set/refresh role for this session (after enforcement)
+        self.roles[user] = final_role
+        # record latest IP for the user (in-memory); persist only for banned users
+        try:
             if ip:
                 self.user_ips[user] = ip
                 # Do not persist non-banned users to banned.json
@@ -400,6 +627,7 @@ class ConnMgr:
             "admins": self._effective_admins(),
             "tags": self.tags,
             "user_activity": self.user_activity,
+            "tag_locks": list(self.tag_locks),
         }
         await self._broadcast(payload)
 

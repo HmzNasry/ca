@@ -20,6 +20,48 @@ app.add_middleware(
 app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
 app.include_router(upload_router)
 
+# Cleanup uploads on server start: remove DM/GC folders and clear main files
+try:
+    import shutil
+    @app.on_event("startup")
+    async def _cleanup_uploads_on_start():
+        try:
+            dm_dir = os.path.join(UPLOAD_DIR, "dm")
+            gc_dir = os.path.join(UPLOAD_DIR, "gc")
+            main_dir = os.path.join(UPLOAD_DIR, "main")
+            # Remove dm and gc folders entirely
+            for d in (dm_dir, gc_dir):
+                if os.path.isdir(d):
+                    try:
+                        shutil.rmtree(d)
+                    except Exception:
+                        pass
+            # Recreate empty dm and gc directories
+            try:
+                os.makedirs(dm_dir, exist_ok=True)
+                os.makedirs(gc_dir, exist_ok=True)
+            except Exception:
+                pass
+            # Clear files inside main directory (but keep the folder)
+            if os.path.isdir(main_dir):
+                try:
+                    for name in os.listdir(main_dir):
+                        p = os.path.join(main_dir, name)
+                        try:
+                            if os.path.isfile(p) or os.path.islink(p):
+                                os.remove(p)
+                            elif os.path.isdir(p):
+                                shutil.rmtree(p)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            # Never crash server due to cleanup
+            pass
+except Exception:
+    pass
+
 @app.post("/login", response_model=Token)
 async def login(data: Login):
     return login_user(data)
