@@ -3,7 +3,7 @@ import json, os, uuid
 from typing import Dict, List
 from fastapi import WebSocket
 
-HISTORY = 100
+HISTORY = 500
 BAN_FILE = os.path.join(os.path.dirname(__file__), "..", "banned.json")
 BAN_FILE = os.path.abspath(BAN_FILE)
 # Persistent admin allow/deny lists
@@ -83,6 +83,44 @@ class ConnMgr:
         self._users = {"users": {}, "ip_to_uid": {}}
         self._username_to_uid = {}
         self._load_users()
+        # Preload persisted tags into runtime map if present
+        try:
+            _normalized_any = False
+            for uid, meta in (self._users.get("users", {}) or {}).items():
+                if not isinstance(meta, dict):
+                    continue
+                uname = (meta.get("username") or "").strip()
+                tag = meta.get("tag")
+                if uname and isinstance(tag, dict) and tag.get("text"):
+                    # Normalize: ensure color present
+                    color = tag.get("color") or "white"
+                    text_val = str(tag.get("text"))
+                    # If a legacy DEV+tag combined string slipped into text (e.g., "DEV) (mytag"), strip the DEV part
+                    try:
+                        if str(tag.get("special") or "").lower() == "dev" and ") (" in text_val:
+                            text_val = text_val.split(") (", 1)[1]
+                            # persist normalization back into in-memory users store
+                            tag["text"] = text_val
+                            meta["tag"] = tag
+                            _normalized_any = True
+                    except Exception:
+                        pass
+                    t_obj = {"text": text_val, "color": str(color)}
+                    # Preserve special if present
+                    if isinstance(tag.get("special"), str):
+                        t_obj["special"] = tag.get("special")
+                    self.tags[uname] = t_obj
+                # Persisted tag lock state
+                if uname and bool(meta.get("tag_locked")):
+                    self.tag_locks.add(uname)
+        except Exception:
+            pass
+        else:
+            try:
+                if _normalized_any:
+                    self._save_users()
+            except Exception:
+                pass
 
     # --- DM helpers ---
     def dm_id(self, a: str, b: str) -> str:
@@ -109,7 +147,17 @@ class ConnMgr:
         for m in arr:
             if m.get("id") == msg_id:
                 m["text"] = text
+                m["edited"] = True
                 # No DB: do nothing
+                return True
+        return False
+
+    def update_main_text(self, msg_id: str, text: str) -> bool:
+        """Update text of a Main message in-place."""
+        for m in self.history:
+            if m.get("id") == msg_id:
+                m["text"] = text
+                m["edited"] = True
                 return True
         return False
 
@@ -222,6 +270,7 @@ class ConnMgr:
         for m in arr:
             if m.get("id") == msg_id:
                 m["text"] = text
+                m["edited"] = True
                 return True
         return False
 
@@ -250,8 +299,8 @@ class ConnMgr:
         base = dict(obj)
         base.setdefault("thread", "gc")
         base["gcid"] = gid
-        # Persist like main/dm: only user message/media
-        if base.get("type") in ("message", "media") and base.get("sender") != "SYSTEM":
+        # Persist like main/dm: include message/media/polls and also system messages for GC
+        if base.get("type") in ("message", "media", "poll", "system") and (base.get("sender") != "SYSTEM" or base.get("type") == "system"):
             gc["history"].append(base)
             if len(gc["history"]) > HISTORY:
                 gc["history"] = gc["history"][-HISTORY:]
@@ -320,6 +369,57 @@ class ConnMgr:
             gc["members"] = mset
         # No DB: do nothing
 
+    # ---- reactions helpers ----
+    def _toggle_reaction_map(self, react_map: dict | None, emoji: str, username: str) -> dict:
+        """Toggle username in reactions map for an emoji. Returns updated map of {emoji: [users...]}"""
+        if react_map is None or not isinstance(react_map, dict):
+            react_map = {}
+        users = set(react_map.get(emoji, []))
+        if username in users:
+            users.remove(username)
+        else:
+            users.add(username)
+        react_map[emoji] = sorted(list(users))
+        # prune empties
+        for k in list(react_map.keys()):
+            if not react_map[k]:
+                react_map.pop(k, None)
+        return react_map
+
+    def toggle_main_reaction(self, msg_id: str, emoji: str, username: str) -> dict | None:
+        for m in self.history:
+            if m.get("id") == msg_id:
+                m["reactions"] = self._toggle_reaction_map(m.get("reactions"), emoji, username)
+                return m.get("reactions")
+        return None
+
+    def toggle_dm_reaction(self, a: str, b: str, msg_id: str, emoji: str, username: str) -> dict | None:
+        tid = self.dm_id(a, b)
+        arr = self.dm_histories.get(tid) or []
+        for m in arr:
+            if m.get("id") == msg_id:
+                m["reactions"] = self._toggle_reaction_map(m.get("reactions"), emoji, username)
+                return m.get("reactions")
+        return None
+
+    def toggle_gc_reaction(self, gid: str, msg_id: str, emoji: str, username: str) -> dict | None:
+        gc = self.gcs.get(gid) or {}
+        arr = gc.get("history", [])
+        for m in arr:
+            if m.get("id") == msg_id:
+                m["reactions"] = self._toggle_reaction_map(m.get("reactions"), emoji, username)
+                return m.get("reactions")
+        return None
+
+    # ---- targeted send helper ----
+    async def send_to_user(self, username: str, payload: dict):
+        ws = self.active.get(username)
+        if not ws:
+            return
+        try:
+            await ws.send_text(json.dumps(payload))
+        except Exception:
+            pass
     def exit_gc(self, gid: str, user: str):
         gc = self.gcs.get(gid)
         if not gc:
@@ -457,6 +557,127 @@ class ConnMgr:
         except Exception as e:
             print("Failed to save users.json:", e)
 
+    # --- persisted tag helpers ---
+    def _ensure_uid_for_username(self, username: str) -> str:
+        uname = (username or "").strip()
+        if not uname:
+            return ""
+        uid = self._get_uid_for_username(uname)
+        if uid:
+            return uid
+        # Create a record without binding to an IP
+        uid = uuid.uuid4().hex
+        self._users.setdefault("users", {})[uid] = {"username": uname, "ips": []}
+        self._username_to_uid[uname] = uid
+        self._save_users()
+        return uid
+
+    def set_user_tag(self, username: str, tag: dict | None):
+        """Update runtime tag map and persist tag into users.json for this username."""
+        uname = (username or "").strip()
+        if not uname:
+            return
+        # Update runtime tags map
+        if tag is None:
+            self.tags.pop(uname, None)
+        else:
+            # normalize structure
+            t_obj = {"text": str(tag.get("text", "")), "color": str(tag.get("color", "white"))}
+            if tag.get("special"):
+                t_obj["special"] = tag.get("special")
+            self.tags[uname] = t_obj
+        # Persist in users.json
+        uid = self._ensure_uid_for_username(uname)
+        if not uid:
+            return
+        meta = self._users.setdefault("users", {}).setdefault(uid, {"username": uname, "ips": []})
+        if tag is None:
+            if "tag" in meta:
+                meta.pop("tag", None)
+        else:
+            # Persist only the personal tag; never persist DEV/ADMIN status markers
+            runtime_tag = self.tags.get(uname) or {}
+            special = str((runtime_tag.get("special") or "")).lower()
+            text_val = str(runtime_tag.get("text") or "")
+            color_val = str(runtime_tag.get("color") or "white")
+            if special == "dev" and text_val.strip().upper() == "DEV":
+                # Base DEV badge only — do not persist anything
+                meta.pop("tag", None)
+            else:
+                # Persist without the special flag so only the personal tag is saved
+                meta["tag"] = {"text": text_val, "color": color_val}
+        self._save_users()
+
+    def clear_user_tag(self, username: str):
+        self.set_user_tag(username, None)
+
+    # --- tag lock persistence ---
+    def set_tag_lock(self, username: str, locked: bool):
+        uname = (username or "").strip()
+        if not uname:
+            return
+        if locked:
+            self.tag_locks.add(uname)
+        else:
+            self.tag_locks.discard(uname)
+        uid = self._ensure_uid_for_username(uname)
+        if not uid:
+            return
+        meta = self._users.setdefault("users", {}).setdefault(uid, {"username": uname, "ips": []})
+        if locked:
+            meta["tag_locked"] = True
+        else:
+            if "tag_locked" in meta:
+                meta.pop("tag_locked", None)
+        self._save_users()
+
+    # --- registry reset ---
+    def reset_users_registry(self):
+        self._users = {"users": {}, "ip_to_uid": {}}
+        self._username_to_uid = {}
+        self._save_users()
+
+    # Public helpers for managing users.json registry
+    def list_user_registry(self) -> List[str]:
+        try:
+            names = []
+            for uid, meta in (self._users.get("users", {}) or {}).items():
+                uname = (meta or {}).get("username")
+                if isinstance(uname, str) and uname:
+                    names.append(uname)
+            # unique + sort
+            return sorted(list({*names}))
+        except Exception:
+            return []
+
+    def remove_user_identity(self, username: str) -> bool:
+        """Remove a username and its uid/ip associations from users.json.
+        Returns True if removed, False if not found or failed.
+        """
+        try:
+            uid = self._username_to_uid.get(username)
+            if not uid:
+                return False
+            user_entry = (self._users.get("users", {}) or {}).get(uid)
+            ips = []
+            if isinstance(user_entry, dict):
+                ips = list(user_entry.get("ips", []) or [])
+            # Remove ip->uid mappings
+            ip_map = self._users.setdefault("ip_to_uid", {})
+            for ip in ips:
+                try:
+                    if ip in ip_map:
+                        ip_map.pop(ip, None)
+                except Exception:
+                    pass
+            # Remove user entry and username index
+            self._users.setdefault("users", {}).pop(uid, None)
+            self._username_to_uid.pop(username, None)
+            self._save_users()
+            return True
+        except Exception:
+            return False
+
     def _get_or_create_uid_for_ip(self, ip: str | None) -> str:
         if not ip:
             # Generate a stable ephemeral uid for None IP
@@ -511,24 +732,33 @@ class ConnMgr:
         return True
 
     def ensure_user_identity(self, ip: str | None, username: str) -> tuple[bool, str | None, str | None]:
-        """Ensure a uid is assigned for this IP and bind the provided username if available.
-        Returns (ok, uid, error_message). When ok is False, uid may be None.
+        """Record last-seen IP and maintain a lightweight username registry.
+        Always ensure a users.json entry exists for this username and refresh IP mapping.
         """
         try:
-            uid = self._get_or_create_uid_for_ip(ip)
-            # Always associate this IP with the uid
-            self._associate_ip(uid, ip)
-            # If username is reserved by another uid, block
-            other = self._get_uid_for_username(username)
-            if other and other != uid:
-                return (False, None, "username is reserved")
-            # Bind username to this uid (updates username history)
-            ok = self._bind_username(uid, username)
-            if not ok:
-                return (False, None, "username is reserved")
+            uname = (username or "").strip()
+            if not uname:
+                return (False, None, "invalid username")
+            # Get existing uid for this username or create a new one
+            uid = self._get_uid_for_username(uname)
+            if not uid:
+                uid = uuid.uuid4().hex
+                self._users.setdefault("users", {})[uid] = {"username": uname, "ips": []}
+            # Associate/refresh IP for audit trail only
+            if ip:
+                self._users.setdefault("users", {}).setdefault(uid, {"username": uname, "ips": []})
+                meta = self._users["users"][uid]
+                ips = meta.get("ips") or []
+                if ip not in ips:
+                    ips.append(ip)
+                    meta["ips"] = ips
+                self._users.setdefault("ip_to_uid", {})[ip] = uid
+            # Rebuild username index and save
+            self._username_to_uid[uname] = uid
+            self._save_users()
             return (True, uid, None)
-        except Exception as e:
-            return (False, None, "identity error")
+        except Exception:
+            return (True, None, None)
 
     def add_persistent_admin(self, user: str, ip: str | None = None):
         if user:
@@ -665,7 +895,7 @@ class ConnMgr:
 
     async def _broadcast(self, obj: dict):
         # Persist only real user messages/media in main; do NOT store system or presence here
-        if obj.get("type") in ("message", "media") and obj.get("sender") and obj.get("sender") != "SYSTEM":
+        if obj.get("type") in ("message", "media", "poll") and obj.get("sender") and obj.get("sender") != "SYSTEM":
             # Treat missing thread as main for backward-compat
             if obj.get("thread") in (None, "main"):
                 self.history.append(obj)

@@ -16,6 +16,116 @@ export async function isUsernameAvailable(name: string): Promise<boolean> {
   return !!d.available;
 }
 
+// Account-based auth (new)
+export async function signUpUser(username: string, displayName: string, password: string): Promise<string> {
+  const r = await fetch("/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, display_name: displayName, password })
+  });
+  if (!r.ok) {
+    const msg = (await r.json().catch(() => ({} as any))).detail || "signup failed";
+    throw new Error(msg);
+  }
+  return (await r.json()).access_token as string;
+}
+
+export async function signInUser(username: string, password: string): Promise<string> {
+  const r = await fetch("/signin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+  if (!r.ok) {
+    const msg = (await r.json().catch(() => ({} as any))).detail || "signin failed";
+    throw new Error(msg);
+  }
+  return (await r.json()).access_token as string;
+}
+
+export async function isAccountAvailable(name: string): Promise<boolean> {
+  const q = encodeURIComponent(name || "");
+  const r = await fetch(`/account-available?name=${q}`);
+  if (!r.ok) return true;
+  const d = await r.json();
+  return !!d.available;
+}
+
+export type AccountInfo = { username: string; display_name: string; created_at?: string | null; last_seen_ip?: string | null };
+
+export async function getAccount(token: string): Promise<AccountInfo> {
+  const r = await fetch("/account", { headers: { Authorization: `Bearer ${token}` } });
+  if (!r.ok) throw new Error("failed to load account");
+  return await r.json();
+}
+
+export async function updateAccount(token: string, data: { username?: string | null; display_name?: string | null; password?: string | null }): Promise<string> {
+  const r = await fetch("/account/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(data)
+  });
+  if (!r.ok) {
+    const msg = (await r.json().catch(() => ({} as any))).detail || "update failed";
+    throw new Error(msg);
+  }
+  return (await r.json()).access_token as string;
+}
+
+export async function deleteAccount(token: string): Promise<boolean> {
+  const r = await fetch("/account/delete", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) {
+    const msg = (await r.json().catch(() => ({} as any))).detail || "delete failed";
+    throw new Error(msg);
+  }
+  const d = await r.json().catch(() => ({} as any));
+  return !!d.ok;
+}
+
+// Admin (DEV) account management
+export async function getAccountAdmin(token: string, username: string): Promise<AccountInfo> {
+  const q = encodeURIComponent(username);
+  const r = await fetch(`/admin/account?username=${q}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!r.ok) {
+    const msg = (await r.json().catch(() => ({} as any))).detail || "failed to load account";
+    throw new Error(msg);
+  }
+  return await r.json();
+}
+
+export async function updateAccountAdmin(token: string, username: string, data: { username?: string | null; display_name?: string | null; password?: string | null }): Promise<AccountInfo> {
+  const q = encodeURIComponent(username);
+  const r = await fetch(`/admin/account/update?username=${q}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(data)
+  });
+  if (!r.ok) {
+    const msg = (await r.json().catch(() => ({} as any))).detail || "update failed";
+    throw new Error(msg);
+  }
+  return await r.json();
+}
+
+export async function deleteAccountAdmin(token: string, username: string): Promise<boolean> {
+  const q = encodeURIComponent(username);
+  const r = await fetch(`/admin/account/delete?username=${q}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) {
+    const msg = (await r.json().catch(() => ({} as any))).detail || "delete failed";
+    throw new Error(msg);
+  }
+  const d = await r.json().catch(() => ({} as any));
+  return !!d.ok;
+}
+
+// deprecated duplicates removed
+
 // Compress image with canvas (progressive downscale)
 async function compressImage(file: File, { maxDim = 1920, quality = 0.82, mime = "image/jpeg" } = {}): Promise<File> {
   const url = URL.createObjectURL(file);

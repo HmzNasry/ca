@@ -7,3 +7,14 @@
     @apply h-full w-full bg-black text-slate-50;
   }
 }
+
+@layer utilities {
+  /* Hide scrollbars while preserving scroll behavior */
+  .no-scrollbar {
+    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none; /* Firefox */
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none; /* Chrome, Safari */
+  }
+}

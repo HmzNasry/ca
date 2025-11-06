@@ -1,1 +1,4 @@
-/backend/uploads
+# Upload folders (do not commit user-generated content)
+/uploads/
+/backend/uploads/
+/backend/app/uploads/

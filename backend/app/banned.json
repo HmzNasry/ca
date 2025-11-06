@@ -1,15 +1,5 @@
 {
-  "users": [
-    "lak",
-    "Riaaa",
-    "Riaaaaaa",
-    "Ria",
-    "Riaaaa",
-    "Riaa"
-  ],
-  "ips": [
-    "2603:800c:641:600:35b5:1af9:285:edee",
-    "2001:56a:7444:c000:2db3:d1a7:ae00:7c88"
-  ],
+  "users": [],
+  "ips": [],
   "user_ips": {}
 }

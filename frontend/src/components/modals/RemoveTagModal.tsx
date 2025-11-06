@@ -4,6 +4,7 @@ type Props = {
   open: boolean;
   me: string;
   users: string[];
+  admins?: string[];
   tagsMap: Record<string, any>;
   isAdminEffective: boolean; // admin or DEV
   isDevEffective: boolean;   // DEV
@@ -12,7 +13,7 @@ type Props = {
   onSubmit: (selected: string[]) => void;
 };
 
-export default function RemoveTagModal({ open, me, users, tagsMap, isAdminEffective, isDevEffective, tagLocks, onClose, onSubmit }: Props) {
+export default function RemoveTagModal({ open, me, users, admins = [], tagsMap, isAdminEffective, isDevEffective, tagLocks, onClose, onSubmit }: Props) {
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const primaryRef = useRef<HTMLButtonElement | null>(null);
 
@@ -32,10 +33,14 @@ export default function RemoveTagModal({ open, me, users, tagsMap, isAdminEffect
       // Non-admin: only self (if tagged)
       return taggedUsers.includes(me) ? [me] : [];
     }
-    // Admin: all tagged users except DEV; respect locks unless DEV
+    // Admin: all tagged users except DEV and other admins (unless DEV); respect locks unless DEV
+    const adminSet = new Set(admins || []);
     return taggedUsers.filter(u => {
       if (isDevUser(u)) return false; // cannot touch DEV user's tag
-      if (!isDevEffective && locked.has(u)) return false; // non-DEV cannot modify locked tags
+      if (!isDevEffective) {
+        if (adminSet.has(u)) return false; // non-DEV admin cannot modify other admins
+        if (locked.has(u)) return false; // non-DEV cannot modify locked tags
+      }
       return true;
     });
   }, [users, tagsMap, isAdminEffective, isDevEffective, me, tagLocks]);
@@ -46,6 +51,14 @@ export default function RemoveTagModal({ open, me, users, tagsMap, isAdminEffect
       setTimeout(() => primaryRef.current?.focus(), 0);
     }
   }, [open]);
+
+  // Escape to close (keep hook order stable)
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); onClose(); } };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -62,6 +75,7 @@ export default function RemoveTagModal({ open, me, users, tagsMap, isAdminEffect
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <style>{`@keyframes modal-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}`}</style>
       <form onSubmit={(e)=>{e.preventDefault(); submit();}} className="relative w-[min(92vw,560px)] max-h-[88vh] overflow-hidden bg-black/90 border border-white/30 rounded-3xl shadow-2xl text-[#f7f3e8] p-0 flex flex-col animate-[modal-in_140ms_ease-out]">
+  <button aria-label="Close" onClick={onClose} className="absolute right-3 top-3 inline-flex items-center justify-center h-8 w-8 rounded-full bg-white/5 hover:bg-white/10 text-[#cfc7aa] hover:text-white border border-white/10 focus:outline-none focus:ring-2 focus:ring-white/30">✕</button>
         <div className="text-center text-white text-lg font-semibold py-4">Remove Tag</div>
         <hr className="border-white/10" />
         <div className="p-4 overflow-y-auto max-h-[60vh]">

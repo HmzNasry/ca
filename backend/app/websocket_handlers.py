@@ -110,7 +110,7 @@ async def _run_ai(ai_id: str, owner: str, prompt: str, image_url: str | None = N
         try:
             # Resolve spinner with a stopped marker
             await manager._broadcast({"type": "update", "id": ai_id, "text": "[STOPPED]"})
-            await manager._system(f"AI generation by {owner} was stopped", store=False)
+            await manager._system(f"AI generation by {owner} was stopped", store=True)
         except Exception:
             pass
         raise

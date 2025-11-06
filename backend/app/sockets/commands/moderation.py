@@ -23,7 +23,7 @@ async def handle_moderation_commands(manager: ConnMgr, ws, sub: str, role: str, 
             await _alert(ws, "INFO", "cannot moderate admins")
             return True
         manager.mute_user(target, minutes)
-        await manager._system(f"{target} was muted for {minutes} minute(s)", store=False)
+        await manager._system(f"{target} was muted for {minutes} minute(s)", store=True)
         if target in manager.active:
             try:
                 await manager.active[target].send_text(json.dumps({
@@ -44,7 +44,7 @@ async def handle_moderation_commands(manager: ConnMgr, ws, sub: str, role: str, 
         target_raw = m.group(1)
         target = canonical_user(manager, target_raw)
         manager.unmute_user(target)
-        await manager._system(f"{target} was unmuted", store=False)
+        await manager._system(f"{target} was unmuted", store=True)
         return True
 
     # /unmute (no args) -> prompt list of currently muted users (admin/dev only)
@@ -72,9 +72,9 @@ async def handle_moderation_commands(manager: ConnMgr, ws, sub: str, role: str, 
             return True
         target_raw = m.group(1)
         target = canonical_user(manager, target_raw)
-        manager.tag_locks.add(target)
+        manager.set_tag_lock(target, True)
         await manager._user_list()
-        await manager._system(f"{target}'s tag was locked", store=False)
+        await manager._system(f"{target}'s tag was locked", store=True)
         return True
 
     # /unlocktag "user" (DEV only)
@@ -85,9 +85,9 @@ async def handle_moderation_commands(manager: ConnMgr, ws, sub: str, role: str, 
             return True
         target_raw = m.group(1)
         target = canonical_user(manager, target_raw)
-        manager.tag_locks.discard(target)
+        manager.set_tag_lock(target, False)
         await manager._user_list()
-        await manager._system(f"{target}'s tag was unlocked", store=False)
+        await manager._system(f"{target}'s tag was unlocked", store=True)
         return True
 
     return False

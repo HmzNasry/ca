@@ -28,6 +28,18 @@ export default function GcSettingsModal({ open, me, users, gc, onClose, onSave, 
       }
     }
   }, [open, gc, me]);
+  // Allow closing with Escape while open
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
 
   const others = useMemo(() => users.filter(u => u !== me), [users, me]);
   const toggle = (u: string) => setSelected(prev => ({ ...prev, [u]: !prev[u] }));
@@ -53,7 +65,7 @@ export default function GcSettingsModal({ open, me, users, gc, onClose, onSave, 
       >
         <div className="flex items-center justify-between px-4 py-3">
           <div className="text-white text-lg font-semibold">Group Settings</div>
-          <button onClick={onClose} className="text-[#cfc7aa] hover:text-white">✕</button>
+          <button onClick={onClose} aria-label="Close" className="inline-flex items-center justify-center h-8 w-8 rounded-full bg-white/5 hover:bg-white/10 text-[#cfc7aa] hover:text-white border border-white/10 focus:outline-none focus:ring-2 focus:ring-white/30">✕</button>
         </div>
         <hr className="border-white/10" />
         <div className="p-4 space-y-4">

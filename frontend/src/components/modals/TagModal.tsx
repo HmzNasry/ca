@@ -5,17 +5,17 @@ type Props = {
   open: boolean;
   me: string;
   users: string[];
-  admins: string[];
   tagsMap: Record<string, any>;
   tagLocks: string[];
   isAdminEffective: boolean;
   onClose: () => void;
   onSubmit: (target: string, label: string, hex: string) => void;
+  onClear?: (target: string) => void; // optional quick clear action
 };
 
 const MAX_LEN = 60;
 
-export default function TagModal({ open, me, users, admins, tagsMap, tagLocks, isAdminEffective, onClose, onSubmit }: Props) {
+export default function TagModal({ open, me, users, tagsMap, tagLocks, isAdminEffective, onClose, onSubmit, onClear }: Props) {
   const [label, setLabel] = useState("");
   const [target, setTarget] = useState<string>(me);
   const [hex, setHex] = useState<string>("#ffffff");
@@ -64,6 +64,13 @@ export default function TagModal({ open, me, users, admins, tagsMap, tagLocks, i
       setTimeout(() => firstButtonRef.current?.focus(), 0);
     }
   }, [open, me]);
+  // Escape to close
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); onClose(); } };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -82,7 +89,8 @@ export default function TagModal({ open, me, users, admins, tagsMap, tagLocks, i
         onSubmit={(e) => { e.preventDefault(); submit(); }}
         className="relative w-[min(92vw,560px)] max-h-[88vh] overflow-hidden bg-black/90 border border-white/30 rounded-3xl shadow-2xl text-[#f7f3e8] p-0 flex flex-col animate-[modal-in_140ms_ease-out]"
       >
-        <div className="text-center text-white text-lg font-semibold py-4">Tag User</div>
+  <button aria-label="Close" onClick={onClose} className="absolute right-3 top-3 inline-flex items-center justify-center h-8 w-8 rounded-full bg-white/5 hover:bg-white/10 text-[#cfc7aa] hover:text-white border border-white/10 focus:outline-none focus:ring-2 focus:ring-white/30">✕</button>
+  <div className="text-center text-white text-lg font-semibold py-4">Tag User</div>
         <hr className="border-white/10" />
         {/* Tag input */}
         <div className="p-4">
@@ -93,7 +101,7 @@ export default function TagModal({ open, me, users, admins, tagsMap, tagLocks, i
               try { v = (emoji as any).replace_colons(v); } catch {}
               setLabel(v.slice(0, MAX_LEN));
             }}
-            placeholder="Tag text (max 30 chars)"
+            placeholder="Tag text (max 60 chars)"
             className="w-full px-4 py-2.5 rounded-2xl bg-white/10 border border-white/15 text-white outline-none focus:border-white/30 transition"
           />
           <div className="mt-1 text-xs text-white/60">Tip: Use :shortcode: to insert emojis (e.g., :sparkles:, :fire:)</div>
@@ -153,9 +161,17 @@ export default function TagModal({ open, me, users, admins, tagsMap, tagLocks, i
           <div className="text-xs text-white/60 mt-2">Will send as -#HEX to backend</div>
         </div>
         <hr className="border-white/10" />
-        <div className="p-4">
+        <div className="p-4 space-y-3">
           <button ref={firstButtonRef} type="submit" className="w-full bg-white text-black rounded-2xl py-2.5 font-medium hover:brightness-95 active:scale-[0.99] transition">
             Apply
+          </button>
+          {/* Quick Clear: available for admins (selected user) and for self even if not admin */}
+          <button
+            type="button"
+            onClick={() => { onClear?.(isAdminEffective ? target : me); onClose(); }}
+            className="w-full rounded-2xl py-2.5 font-medium border border-white/20 text-white hover:bg-white/10 active:scale-[0.99] transition"
+          >
+            {isAdminEffective ? (target === me ? "Clear My Tag" : `Clear ${target}'s Tag`) : "Clear My Tag"}
           </button>
         </div>
       </form>

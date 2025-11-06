@@ -2,6 +2,8 @@ import re, json
 from ..helpers import canonical_user, is_dev, is_effective_admin
 from ...services.manager import ConnMgr
 from ... import auth as auth_mod
+from ...upload import UPLOAD_DIR
+import os, shutil
 
 # Admin and DEV command handlers
 
@@ -20,7 +22,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
     m = re.match(r'^\s*/pass\s+"([^"]+)"\s*$', txt, re.I)
     if m:
         auth_mod.SERVER_PASSWORD = m.group(1)
-        await manager._system("server message changed", store=False)
+        await manager._system("server message changed", store=True)
         return True
 
     # /mkadmin "username" superpass
@@ -47,7 +49,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             manager.remove_admin_blacklist(target)
         except Exception:
             pass
-        await manager._system(f"{target} was granted admin", store=False)
+        await manager._system(f"{target} was granted admin", store=True)
         await manager._user_list()
         return True
 
@@ -82,7 +84,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             manager.add_admin_blacklist(target, ip_t)
         except Exception:
             pass
-        await manager._system(f"{target} was demoted from admin", store=False)
+        await manager._system(f"{target} was demoted from admin", store=True)
         await manager._user_list()
         return True
 
@@ -94,7 +96,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             await _alert(ws, "INFO", "cannot moderate admins")
             return True
         if target in manager.active:
-            await manager._system(f"{target} was kicked by admin", store=False)
+            await manager._system(f"{target} was kicked by admin", store=True)
             try:
                 await manager.active[target].send_text(json.dumps({"type": "alert", "code": "KICKED", "text": "You were kicked by admin"}))
             except: pass
@@ -125,7 +127,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
                 pass
             manager.active.pop(u, None)
         await manager._user_list()
-        await manager._system("admin kicked everyone", store=False)
+        await manager._system("admin kicked everyone", store=True)
         return True
 
     # /purgeadmin (demote every admin / promoted admin except DEV users)
@@ -155,11 +157,93 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             try:
                 t = (tag or {}).get('text', '')
                 if isinstance(t, str) and t.strip().upper() == 'ADMIN':
-                    manager.tags.pop(u, None)
+                    manager.clear_user_tag(u)
             except Exception:
                 pass
         await manager._user_list()
-        await manager._system("all admins purged", store=False)
+        await manager._system("all admins purged", store=True)
+        return True
+
+    # /reset "superpass" (DEV only): clear history, users registry, admins, admin blacklist, bans, uploads
+    m = re.match(r'^\s*/reset\s+"([^\"]+)"\s*$', txt, re.I)
+    if m:
+        if not is_dev(manager, sub):
+            await _alert(ws, "INFO", "only DEV can reset server state")
+            return True
+        sup = m.group(1)
+        if sup != getattr(auth_mod, 'SUPER_PASS', ''):
+            await _alert(ws, "INFO", "invalid superpass")
+            return True
+        # 1) Clear histories and runtime state
+        manager.history = []
+        manager.dm_histories = {}
+        manager.gcs = {}
+        manager.tags = {}
+        manager.tag_rejects = set()
+        manager.tag_locks = set()
+        manager.mutes = {}
+        manager.mute_all = False
+        manager.user_activity = {}
+        manager.roles = {}
+        manager.promoted_admins = set()
+        manager.demoted_admins = set()
+        manager.demoted_admin_ips = set()
+        manager.user_ips = {}
+        # 1a) Clear accounts/auth DB
+        try:
+            auth_mod.reset_auth()
+        except Exception:
+            pass
+        # 2) Clear persistent lists/files via managers
+        manager.banned_users = set()
+        manager.banned_ips = set()
+        manager._save_bans()
+        manager.persistent_admin_users = set()
+        manager.persistent_admin_ips = set()
+        manager._admin_user_ips = {}
+        manager._save_admins()
+        manager.admin_blacklist_users = set()
+        manager.admin_blacklist_ips = set()
+        manager._admin_blacklist_user_ips = {}
+        manager._save_admin_blacklist()
+        # 3) Clear users registry (users.json)
+        manager.reset_users_registry()
+        # 4) Remove uploads (dm, gc, main contents)
+        try:
+            dm_dir = os.path.join(UPLOAD_DIR, "dm")
+            gc_dir = os.path.join(UPLOAD_DIR, "gc")
+            main_dir = os.path.join(UPLOAD_DIR, "main")
+            for d in (dm_dir, gc_dir, main_dir):
+                if os.path.isdir(d):
+                    shutil.rmtree(d)
+            os.makedirs(dm_dir, exist_ok=True)
+            os.makedirs(gc_dir, exist_ok=True)
+            os.makedirs(main_dir, exist_ok=True)
+        except Exception:
+            pass
+        # Notify all connected clients with a modal and then force sign-out on dismiss
+        try:
+            payload = json.dumps({"type": "alert", "code": "RESET", "text": "Server state has been reset"})
+            for u, ws_target in list(manager.active.items()):
+                try:
+                    await ws_target.send_text(payload)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await manager._user_list()
+        await manager._system("server state reset by DEV", store=True)
+        return True
+
+    # /reset (no args) -> prompt superpass on the client
+    if re.match(r'^\s*/reset\s*$', txt, re.I):
+        if not is_dev(manager, sub):
+            await _alert(ws, "INFO", "only DEV can reset server state")
+            return True
+        try:
+            await ws.send_text(json.dumps({"type": "reset_prompt"}))
+        except Exception:
+            pass
         return True
 
     # /muteA <minutes>  (DEV only) mute everyone for N minutes (excluding issuing DEV)
@@ -197,7 +281,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         manager.mute_all = False
         for u in list(manager.mutes.keys()):
             manager.unmute_user(u)
-        await manager._system("all mutes lifted by admin", store=False)
+        await manager._system("all mutes lifted by admin", store=True)
         return True
 
     # /psa "message" (DEV only) modal for everyone, not persisted
@@ -215,6 +299,50 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
                 pass
         return True
 
+    # /users (DEV only) -> prompt list from auth users file (auth_users.json)
+    if re.match(r'^\s*/users\s*$', txt, re.I):
+        if not is_dev(manager, sub):
+            await _alert(ws, "INFO", "only DEV can use /users")
+            return True
+        try:
+            from ... import auth as auth_mod
+            reg_users = auth_mod.list_account_usernames()
+        except Exception:
+            reg_users = []
+        await ws.send_text(json.dumps({"type": "users_prompt", "users": reg_users}))
+        return True
+
+    # /rmuser "username" (DEV only) -> remove from users.json registry and kick if online
+    m = re.match(r'^\s*/rmuser\s+"([^"]+)"\s*$', txt, re.I)
+    if m:
+        if not is_dev(manager, sub):
+            await _alert(ws, "INFO", "only DEV can use /rmuser")
+            return True
+        target = m.group(1)
+        # If the user is currently online, notify and disconnect them first
+        if target in manager.active:
+            try:
+                ws_target = manager.active.get(target)
+                if ws_target:
+                    try:
+                        await ws_target.send_text(json.dumps({"type": "alert", "code": "ACCOUNT_DELETED", "text": "Your account was deleted"}))
+                    except Exception:
+                        pass
+                    try:
+                        await ws_target.close()
+                    except Exception:
+                        pass
+                manager.active.pop(target, None)
+                await manager._user_list()
+            except Exception:
+                pass
+        ok = manager.remove_user_identity(target)
+        if ok:
+            await manager._system(f"removed {target} from users registry", store=True)
+        else:
+            await _alert(ws, "INFO", f"{target} not found in users registry")
+        return True
+
     # /ban "username"
     m = re.match(r'^\s*/ban\s+"([^"]+)"\s*$', txt, re.I)
     if m:
@@ -226,7 +354,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             ws_target = manager.active[target]
             ip_target = ws_target.client.host
             manager.ban_user(target, ip_target)
-            await manager._system(f"{target} was banned by admin", store=False)
+            await manager._system(f"{target} was banned by admin", store=True)
             try:
                 await ws_target.send_text(json.dumps({"type": "alert", "code": "BANNED", "text": "You were banned from chat"}))
             except: pass
@@ -235,7 +363,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             await manager._user_list()
         else:
             manager.ban_user(target)
-            await manager._system(f"{target} (offline) was banned by admin", store=False)
+            await manager._system(f"{target} (offline) was banned by admin", store=True)
         return True
 
     # /unban (no args) -> prompt banned list
@@ -257,7 +385,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         existed = target in manager.banned_users
         if existed:
             manager.unban_user(target)
-            await manager._system(f"{target} was unbanned by admin", store=False)
+            await manager._system(f"{target} was unbanned by admin", store=True)
         else:
             await _alert(ws, "NOT_BANNED", f"{target} is not banned")
         return True

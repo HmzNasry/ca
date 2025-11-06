@@ -75,7 +75,7 @@ async def get_youtube_preview(text: str):
         return "YOUTUBE_PREVIEW_FAILED: Unexpected"
 
 manager = ConnMgr()
-manager.HISTORY = 100 if hasattr(manager, 'HISTORY') else None
+manager.HISTORY = 500 if hasattr(manager, 'HISTORY') else None
 # Map usernames to last known IP
 manager.user_ips = {}  # username -> last known IP
 
@@ -114,7 +114,7 @@ async def _run_ai(ai_id: str, owner: str, prompt: str, image_url: str | None = N
         try:
             # Resolve spinner with a stopped marker
             await manager._broadcast({"type": "update", "id": ai_id, "text": "[STOPPED]"})
-            await manager._system(f"AI generation by {owner} was stopped", store=False)
+            await manager._system(f"AI generation by {owner} was stopped", store=True)
         except Exception:
             pass
         raise
@@ -140,7 +140,8 @@ async def ws_handler(ws: WebSocket, token: str):
     global ai_enabled
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
+        sub = payload.get("sub")  # display name used in chat
+        acct_user = payload.get("acct") or sub  # fallback
         role = payload.get("role", "user")
     except JWTError:
         await ws.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -148,7 +149,7 @@ async def ws_handler(ws: WebSocket, token: str):
 
     ip = ws.client.host
     # Enforce persistent identity: bind username to uid for this IP and block reserved names
-    ok_uid, uid, err = manager.ensure_user_identity(ip, sub)
+    ok_uid, uid, err = manager.ensure_user_identity(ip, acct_user)
     if not ok_uid:
         await ws.accept()
         await ws.send_text(json.dumps({"type": "alert", "code": "USERNAME_TAKEN", "text": "Username is reserved for another user"}))
@@ -156,6 +157,11 @@ async def ws_handler(ws: WebSocket, token: str):
         return
     # Update last known IP for this username (legacy per-username mapping)
     manager.user_ips[sub] = ip
+    # Update account last-seen IP in auth DB (if account exists)
+    try:
+        auth_mod.set_last_seen_ip(acct_user, ip)
+    except Exception:
+        pass
 
     # Reject duplicate usernames (already connected)
     try:
@@ -182,13 +188,25 @@ async def ws_handler(ws: WebSocket, token: str):
         await ws.send_text(json.dumps({"type": "gc_list", "gcs": gcs}))
     except Exception:
         pass
-    # Special DEV tag for localhost connections — also promote to admin for unrestricted permissions
+    # Special DEV tag for localhost connections — DEV is superior to admin but not assigned admin role
     try:
         if ip in ("127.0.0.1", "::1", "localhost"):
-            manager.tags[sub] = {"text": "DEV", "color": "rainbow", "special": "dev"}
-            manager.roles[sub] = "admin"
-            manager.promoted_admins.add(sub)
-            manager.demoted_admins.discard(sub)
+            # Preserve any existing personal tag text, just enforce DEV styling
+            existing = manager.tags.get(sub) if isinstance(manager.tags, dict) else None
+            text = None
+            try:
+                if isinstance(existing, dict) and isinstance(existing.get("text"), str) and existing.get("text").strip():
+                    text = existing.get("text").strip()
+            except Exception:
+                text = None
+            if not text:
+                text = "DEV"
+            # Persist styled DEV tag (rainbow + special), keep user's text as-is
+            try:
+                manager.set_user_tag(sub, {"text": text, "color": "rainbow", "special": "dev"})
+            except Exception:
+                # Fallback to in-memory only
+                manager.tags[sub] = {"text": text, "color": "rainbow", "special": "dev"}
             await manager._user_list()
     except Exception:
         pass
@@ -250,6 +268,10 @@ async def ws_handler(ws: WebSocket, token: str):
             if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
                 peer = data.get("peer").strip()
                 if peer and peer != sub:
+                    # /poll is not allowed in DMs
+                    if re.match(r'^\s*/poll\s*$', txt, re.I):
+                        await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Poll only available in Main or GC"}))
+                        continue
                     # Trigger Create-GC prompt from anywhere
                     if re.match(r'^\s*/makegc\s*$', txt, re.I):
                         await ws.send_text(json.dumps({"type": "gc_prompt"}))
@@ -415,6 +437,31 @@ async def ws_handler(ws: WebSocket, token: str):
                         dm_text = str(data.get("text"))[:4000]
                         mid = f"{sub}-{int(now.timestamp()*1000)}"
                         msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": dm_text, "thread": "dm", "peer": peer}
+                        # Reply metadata (DM)
+                        try:
+                            if isinstance(data.get("reply_to_id"), str):
+                                rid = data.get("reply_to_id").strip()
+                                if rid:
+                                    items = manager.get_dm_history(sub, peer)
+                                    orig = next((m for m in items if m.get("id") == rid), None)
+                                    if orig:
+                                        preview = ""
+                                        if orig.get("type") == "message":
+                                            preview = str(orig.get("text") or "")[:120]
+                                        elif orig.get("type") == "media":
+                                            preview = "[media]"
+                                        elif orig.get("type") == "poll":
+                                            preview = "[poll]"
+                                        msg["reply_to"] = {"id": rid, "sender": orig.get("sender"), "text": preview}
+                                        # Ping original sender to flash if online
+                                        try:
+                                            orig_sender = orig.get("sender")
+                                            if orig_sender and orig_sender != sub:
+                                                await manager.send_to_user(orig_sender, {"type": "flash", "id": rid, "thread": "dm", "peer": sub})
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
                         
                         # Get Spotify preview
                         spotify_preview_html = await get_spotify_preview(msg["text"])
@@ -459,28 +506,12 @@ async def ws_handler(ws: WebSocket, token: str):
                 if not gid or not manager.user_in_gc(gid, sub):
                     await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not in this group chat"}))
                     continue
-                # Route tag/admin/moderation commands within GC as in Main/DM
-                if txt.startswith('/'):
-                    handled = False
-                    # Public tag commands
-                    if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
-                        if await handle_tag_commands(manager, ws, sub, role, txt):
-                            handled = True
-                    # Admin/dev commands
-                    if not handled and _is_effective_admin(manager, sub):
-                        if await handle_admin_commands(manager, ws, sub, role, txt):
-                            handled = True
-                        elif await handle_moderation_commands(manager, ws, sub, role, txt):
-                            handled = True
-                        elif await handle_tag_commands(manager, ws, sub, role, txt):
-                            handled = True
-                    if handled:
-                        continue
-                    # Unknown slash in GC -> invalid command
-                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Invalid command"}))
+                # /poll in GC opens poll creation modal
+                if re.match(r'^\s*/poll\s*$', txt, re.I):
+                    await ws.send_text(json.dumps({"type": "poll_prompt"}))
                     continue
-                # Commands in GC
-                if txt == "/clear":
+                # Handle GC-specific slash commands first
+                if re.match(r'^\s*/clear\s*$', txt, re.I):
                     # Only GC creator can clear
                     try:
                         gc = manager.gcs.get(gid) or {}
@@ -503,6 +534,28 @@ async def ws_handler(ws: WebSocket, token: str):
                     except Exception:
                         pass
                     continue
+
+                # Route tag/admin/moderation commands within GC as in Main/DM
+                if txt.startswith('/'):
+                    handled = False
+                    # Public tag commands
+                    if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
+                        if await handle_tag_commands(manager, ws, sub, role, txt):
+                            handled = True
+                    # Admin/dev commands
+                    if not handled and _is_effective_admin(manager, sub):
+                        if await handle_admin_commands(manager, ws, sub, role, txt):
+                            handled = True
+                        elif await handle_moderation_commands(manager, ws, sub, role, txt):
+                            handled = True
+                        elif await handle_tag_commands(manager, ws, sub, role, txt):
+                            handled = True
+                    if handled:
+                        continue
+                    # Unknown slash in GC -> invalid command
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "Invalid command"}))
+                    continue
+                # Commands in GC (others handled below)
                 # Delete a message in GC
                 m_del_gc = re.match(r'^\s*/delete\s+(\S+)\s*$', txt, re.I)
                 if m_del_gc:
@@ -631,6 +684,31 @@ async def ws_handler(ws: WebSocket, token: str):
                     gc_text = str(data.get("text"))[:4000]
                     mid = f"{sub}-{int(now.timestamp()*1000)}"
                     msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": gc_text, "thread": "gc"}
+                    # Reply metadata (GC)
+                    try:
+                        if isinstance(data.get("reply_to_id"), str):
+                            rid = data.get("reply_to_id").strip()
+                            if rid:
+                                arr = (manager.gcs.get(gid) or {}).get("history", [])
+                                orig = next((m for m in arr if m.get("id") == rid), None)
+                                if orig:
+                                    preview = ""
+                                    if orig.get("type") == "message":
+                                        preview = str(orig.get("text") or "")[:120]
+                                    elif orig.get("type") == "media":
+                                        preview = "[media]"
+                                    elif orig.get("type") == "poll":
+                                        preview = "[poll]"
+                                    msg["reply_to"] = {"id": rid, "sender": orig.get("sender"), "text": preview}
+                                    # Ping original sender
+                                    try:
+                                        orig_sender = orig.get("sender")
+                                        if orig_sender and orig_sender != sub:
+                                            await manager.send_to_user(orig_sender, {"type": "flash", "id": rid, "thread": "gc", "gcid": gid})
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
                     
                     # Get Spotify preview
                     spotify_preview_html = await get_spotify_preview(msg["text"])
@@ -767,6 +845,11 @@ async def ws_handler(ws: WebSocket, token: str):
                 await ws.send_text(json.dumps({"type": "gc_prompt"}))
                 continue
 
+            # Global: /poll prompt to open creation modal
+            if re.match(r'^\s*/poll\s*$', txt, re.I):
+                await ws.send_text(json.dumps({"type": "poll_prompt"}))
+                continue
+
             # Global /clear for Main (admin/dev only)
             if txt == "/clear" and _is_effective_admin(manager, sub) and not (data.get("thread") == "dm"):
                 # Clear history first, then post a system line
@@ -836,11 +919,11 @@ async def ws_handler(ws: WebSocket, token: str):
                     action = m_ai_toggle.group(1).lower()
                     if action == "disable":
                         ai_enabled = False
-                        await manager._system("ai has been disabled by admin", store=False)
+                        await manager._system("ai has been disabled by admin", store=True)
                         logger.info("AI disabled by admin %s", sub)
                     else:
                         ai_enabled = True
-                        await manager._system("ai has been enabled by admin", store=False)
+                        await manager._system("ai has been enabled by admin", store=True)
                         logger.info("AI enabled by admin %s", sub)
                     continue
 
@@ -899,6 +982,9 @@ async def ws_handler(ws: WebSocket, token: str):
                     # Allow /clear for authorized users
                     if txt.strip().lower() == '/clear' and _is_effective_admin(manager, sub):
                         continue
+                    # Allow /poll to be handled earlier
+                    if re.match(r'^\s*/poll\s*$', txt, re.I):
+                        continue
                     # Last-chance routing for commands in Main
                     handled = False
                     if re.match(r'^\s*/(tag|rmtag|rjtag|acptag)\b', txt, re.I):
@@ -927,6 +1013,29 @@ async def ws_handler(ws: WebSocket, token: str):
                 ts = now.isoformat() + "Z"
                 mid = f"{sub}-{int(now.timestamp()*1000)}"
                 msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "message", "text": str(data.get("text"))[:4000], "thread": "main"}
+                # Reply metadata (Main)
+                try:
+                    if isinstance(data.get("reply_to_id"), str):
+                        rid = data.get("reply_to_id").strip()
+                        if rid:
+                            orig = next((m for m in manager.history if m.get("id") == rid), None)
+                            if orig:
+                                preview = ""
+                                if orig.get("type") == "message":
+                                    preview = str(orig.get("text") or "")[:120]
+                                elif orig.get("type") == "media":
+                                    preview = "[media]"
+                                elif orig.get("type") == "poll":
+                                    preview = "[poll]"
+                                msg["reply_to"] = {"id": rid, "sender": orig.get("sender"), "text": preview}
+                                try:
+                                    orig_sender = orig.get("sender")
+                                    if orig_sender and orig_sender != sub:
+                                        await manager.send_to_user(orig_sender, {"type": "flash", "id": rid, "thread": "main"})
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
                 
                 # Get Spotify preview
                 spotify_preview_html = await get_spotify_preview(msg["text"])
@@ -954,6 +1063,317 @@ async def ws_handler(ws: WebSocket, token: str):
                 mid = f"{sub}-{int(now.timestamp()*1000)}"
                 msg = {"id": mid, "sender": sub, "timestamp": ts, "type": "media", "url": url, "mime": mime, "thread": "main"}
                 await manager._broadcast(msg)
+
+            # --- Create poll (Main/DM/GC depending on thread payload) ---
+            if data.get("type") == "create_poll" and isinstance(data.get("question"), str) and isinstance(data.get("options"), list):
+                question = (data.get("question") or "").strip()
+                raw_opts = [str(x) for x in data.get("options") if isinstance(x, str)]
+                options = [o.strip() for o in raw_opts if o.strip()]
+                # Validate server-side
+                if not question or len(options) < 2:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "poll needs a question and at least 2 options"}))
+                    continue
+                if len(options) > 10:
+                    options = options[:10]
+                # Build poll object
+                ts = now.isoformat() + "Z"
+                pid = f"poll-{int(now.timestamp()*1000)}"
+                # votes map: username -> index
+                votes = {}
+                counts = [0 for _ in options]
+                total_voters = 0
+                # total possible: main=online users; dm=2; gc=members count
+                total_possible = 0
+                thread = 'main'
+                peer = None
+                gcid = None
+                if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
+                    thread = 'dm'
+                    peer = data.get("peer").strip()
+                    total_possible = 2 if peer and peer != sub else 1
+                elif data.get("thread") == "gc" and isinstance(data.get("gcid"), str):
+                    thread = 'gc'
+                    gcid = data.get("gcid").strip()
+                    gc = manager.gcs.get(gcid) or {}
+                    total_possible = len(gc.get("members", set()))
+                else:
+                    thread = 'main'
+                    total_possible = len(manager.active)
+
+                poll_msg = {
+                    "id": pid,
+                    "sender": sub,
+                    "timestamp": ts,
+                    "type": "poll",
+                    "question": question,
+                    "options": options,
+                    "counts": counts,
+                    "total_voters": total_voters,
+                    "total_possible": total_possible,
+                    "votes": votes,  # username -> choice index
+                }
+                if thread == 'dm' and peer and peer != sub:
+                    await manager._broadcast_dm(sub, peer, {**poll_msg, "thread": "dm", "peer": peer})
+                elif thread == 'gc' and gcid and manager.user_in_gc(gcid, sub):
+                    await manager._broadcast_gc(gcid, {**poll_msg, "thread": "gc", "gcid": gcid})
+                else:
+                    await manager._broadcast({**poll_msg, "thread": "main"})
+                continue
+
+            # --- Vote on poll ---
+            if data.get("type") == "vote_poll" and isinstance(data.get("poll_id"), str):
+                pid = data.get("poll_id").strip()
+                try:
+                    choice = int(data.get("choice"))
+                except Exception:
+                    choice = -1
+                # locate poll in appropriate thread history
+                thread = 'main'
+                peer = None
+                gcid = None
+                if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
+                    thread = 'dm'; peer = data.get("peer").strip()
+                elif data.get("thread") == "gc" and isinstance(data.get("gcid"), str):
+                    thread = 'gc'; gcid = data.get("gcid").strip()
+                target = None
+                if thread == 'dm' and peer and peer != sub:
+                    items = manager.get_dm_history(sub, peer)
+                    for m in items:
+                        if m.get("id") == pid and m.get("type") == "poll":
+                            target = m; break
+                elif thread == 'gc' and gcid and manager.user_in_gc(gcid, sub):
+                    arr = (manager.gcs.get(gcid) or {}).get("history", [])
+                    for m in arr:
+                        if m.get("id") == pid and m.get("type") == "poll":
+                            target = m; break
+                else:
+                    for m in manager.history:
+                        if m.get("id") == pid and m.get("type") == "poll":
+                            target = m; break
+                if not target:
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "poll not found"}))
+                    continue
+                opts = target.get("options") or []
+                if not isinstance(opts, list) or choice < 0 or choice >= len(opts):
+                    await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "invalid choice"}))
+                    continue
+                # update vote
+                votes = target.get("votes") or {}
+                if not isinstance(votes, dict):
+                    votes = {}
+                prev = votes.get(sub)
+                votes[sub] = choice
+                target["votes"] = votes
+                # recompute counts
+                counts = [0 for _ in opts]
+                for _, idx in votes.items():
+                    try:
+                        counts[int(idx)] += 1
+                    except Exception:
+                        pass
+                target["counts"] = counts
+                target["total_voters"] = sum(counts)
+                # re-broadcast an update
+                payload = {"type": "poll_update", "id": pid, "counts": counts, "total_voters": target["total_voters"], "votes": votes}
+                if thread == 'dm' and peer and peer != sub:
+                    await manager._broadcast_dm_update(sub, peer, {**payload, "thread": "dm", "peer": peer})
+                elif thread == 'gc' and gcid and manager.user_in_gc(gcid, sub):
+                    await manager._broadcast_gc_update(gcid, {**payload, "thread": "gc", "gcid": gcid})
+                else:
+                    await manager._broadcast({**payload, "thread": "main"})
+                continue
+
+            # --- Edit message (own message only; DEV can edit any) ---
+            if data.get("type") == "edit_message" and isinstance(data.get("id"), str) and isinstance(data.get("text"), str):
+                try:
+                    target_id = data.get("id").strip()
+                    new_text = (data.get("text") or "")[:4000]
+                    thread = 'main'
+                    peer = None
+                    gcid = None
+                    if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
+                        thread = 'dm'; peer = data.get("peer").strip()
+                        items = manager.get_dm_history(sub, peer)
+                        owner = None
+                        for m in items:
+                            if m.get("id") == target_id:
+                                owner = m.get("sender"); break
+                        if not owner:
+                            continue
+                        if owner != sub and not _is_dev(manager, sub):
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not allowed"}))
+                            continue
+                        if not manager.update_dm_text(sub, peer, target_id, new_text):
+                            continue
+                        await manager._broadcast_dm_update(sub, peer, {"type": "message_update", "id": target_id, "text": new_text, "edited": True, "thread": "dm", "peer": peer})
+                    elif data.get("thread") == "gc" and isinstance(data.get("gcid"), str):
+                        thread = 'gc'; gcid = data.get("gcid").strip()
+                        gc = manager.gcs.get(gcid) or {}
+                        arr = gc.get("history", [])
+                        owner = None
+                        for m in arr:
+                            if m.get("id") == target_id:
+                                owner = m.get("sender"); break
+                        if not owner:
+                            continue
+                        if owner != sub and not _is_dev(manager, sub):
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not allowed"}))
+                            continue
+                        if not manager.update_gc_text(gcid, target_id, new_text):
+                            continue
+                        await manager._broadcast_gc_update(gcid, {"type": "message_update", "id": target_id, "text": new_text, "edited": True, "thread": "gc", "gcid": gcid})
+                    else:
+                        # main
+                        owner = None
+                        for m in manager.history:
+                            if m.get("id") == target_id:
+                                owner = m.get("sender"); break
+                        if not owner:
+                            continue
+                        if owner != sub and not _is_dev(manager, sub):
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not allowed"}))
+                            continue
+                        if not manager.update_main_text(target_id, new_text):
+                            continue
+                        await manager._broadcast({"type": "message_update", "id": target_id, "text": new_text, "edited": True, "thread": "main"})
+                except Exception:
+                    pass
+                continue
+
+            # --- Delete message via typed command (more robust than parsing /delete) ---
+            if data.get("type") == "delete_message" and isinstance(data.get("id"), str):
+                try:
+                    target_id = data.get("id").strip()
+                    if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
+                        peer = data.get("peer").strip()
+                        if not peer or peer == sub:
+                            continue
+                        ok = manager.delete_dm_message(sub, peer, target_id, requester=sub, allow_any=True)
+                        if ok:
+                            await manager._broadcast_dm_update(sub, peer, {"type": "delete", "id": target_id, "thread": "dm", "peer": peer})
+                    elif data.get("thread") == "gc" and isinstance(data.get("gcid"), str):
+                        gid = data.get("gcid").strip()
+                        gc = manager.gcs.get(gid)
+                        if not gc:
+                            continue
+                        target_msg = next((m for m in gc.get("history", []) if m.get("id") == target_id), None)
+                        if not target_msg:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "message not found"}))
+                            continue
+                        owner = target_msg.get("sender")
+                        is_requester_dev = _is_dev(manager, sub)
+                        is_requester_admin = _is_effective_admin(manager, sub)
+                        is_owner_dev = _is_dev(manager, owner)
+                        is_owner_admin = _is_effective_admin(manager, owner)
+                        is_requester_creator = gc.get("creator") == sub
+                        can_delete = False
+                        if is_requester_dev:
+                            can_delete = True
+                        elif is_requester_admin:
+                            if owner == sub or (not is_owner_admin and not is_owner_dev):
+                                can_delete = True
+                        elif is_requester_creator and owner != sub:
+                            if not is_owner_admin and not is_owner_dev:
+                                can_delete = True
+                        elif owner == sub:
+                            can_delete = True
+                        if not can_delete:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not allowed"}))
+                            continue
+                        if manager.delete_gc_message(gid, target_id, requester=sub, allow_any=True):
+                            await manager._broadcast_gc_update(gid, {"type": "delete", "id": target_id, "thread": "gc"})
+                    else:
+                        # main
+                        target_msg = next((m for m in manager.history if m.get("id") == target_id), None)
+                        if not target_msg:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "message not found"}))
+                            continue
+                        owner = target_msg.get("sender")
+                        is_requester_dev = _is_dev(manager, sub)
+                        is_requester_admin = _is_effective_admin(manager, sub)
+                        is_owner_dev = _is_dev(manager, owner)
+                        is_owner_admin = _is_effective_admin(manager, owner)
+                        can_delete = False
+                        if is_requester_dev:
+                            can_delete = True
+                        elif is_requester_admin:
+                            if owner == sub or (not is_owner_admin and not is_owner_dev):
+                                can_delete = True
+                        elif owner == sub:
+                            can_delete = True
+                        if not can_delete:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "not allowed"}))
+                            continue
+                        if manager.delete_main_message(target_id):
+                            await manager._broadcast({"type": "delete", "id": target_id, "thread": "main"})
+                except Exception:
+                    pass
+                continue
+
+            # --- React to a message (toggle) ---
+            if data.get("type") == "react_message" and isinstance(data.get("id"), str) and isinstance(data.get("emoji"), str):
+                try:
+                    target_id = data.get("id").strip()
+                    emoji = (data.get("emoji") or "").strip()[:16]
+                    if not emoji:
+                        continue
+                    thread = 'main'
+                    peer = None
+                    gcid = None
+                    if data.get("thread") == "dm" and isinstance(data.get("peer"), str):
+                        thread = 'dm'; peer = data.get("peer").strip()
+                        # Enforce max 5 unique reactions per message
+                        items = manager.get_dm_history(sub, peer)
+                        tgt = None
+                        for mm in items:
+                            if mm.get("id") == target_id:
+                                tgt = mm; break
+                        if not tgt:
+                            continue
+                        current = tgt.get("reactions") or {}
+                        if emoji not in current.keys() and len(list(current.keys())) >= 5:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "max 5 reactions"}))
+                            continue
+                        reacts = manager.toggle_dm_reaction(sub, peer, target_id, emoji, sub)
+                        if reacts is None:
+                            continue
+                        await manager._broadcast_dm_update(sub, peer, {"type": "reaction_update", "id": target_id, "reactions": reacts, "thread": "dm", "peer": peer})
+                    elif data.get("thread") == "gc" and isinstance(data.get("gcid"), str):
+                        thread = 'gc'; gcid = data.get("gcid").strip()
+                        gc = manager.gcs.get(gcid) or {}
+                        tgt = None
+                        for mm in gc.get("history", []):
+                            if mm.get("id") == target_id:
+                                tgt = mm; break
+                        if not tgt:
+                            continue
+                        current = tgt.get("reactions") or {}
+                        if emoji not in current.keys() and len(list(current.keys())) >= 5:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "max 5 reactions"}))
+                            continue
+                        reacts = manager.toggle_gc_reaction(gcid, target_id, emoji, sub)
+                        if reacts is None:
+                            continue
+                        await manager._broadcast_gc_update(gcid, {"type": "reaction_update", "id": target_id, "reactions": reacts, "thread": "gc", "gcid": gcid})
+                    else:
+                        # main
+                        tgt = None
+                        for mm in manager.history:
+                            if mm.get("id") == target_id:
+                                tgt = mm; break
+                        if not tgt:
+                            continue
+                        current = tgt.get("reactions") or {}
+                        if emoji not in current.keys() and len(list(current.keys())) >= 5:
+                            await ws.send_text(json.dumps({"type": "alert", "code": "INFO", "text": "max 5 reactions"}))
+                            continue
+                        reacts = manager.toggle_main_reaction(target_id, emoji, sub)
+                        if reacts is None:
+                            continue
+                        await manager._broadcast({"type": "reaction_update", "id": target_id, "reactions": reacts, "thread": "main"})
+                except Exception:
+                    pass
+                continue
 
     except WebSocketDisconnect:
         pass

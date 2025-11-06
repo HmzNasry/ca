@@ -75,22 +75,16 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
             return True
         # If self is DEV, preserve DEV rainbow and append the personal tag
         if _is_dev_user(manager, sub):
-            combined = f"DEV) ({tag_text}"
-            # Clamp entire display label for DEV
-            combined, trimmed_final = _clamp_label(combined)
-            manager.tags[sub] = {"text": combined, "color": "rainbow", "special": "dev"}
+            # DEV: store only the user's personal tag text; mark special but keep chosen color
+            manager.set_user_tag(sub, {"text": tag_text, "color": color, "special": "dev"})
         else:
-            manager.tags[sub] = {"text": tag_text, "color": color}
+            manager.set_user_tag(sub, {"text": tag_text, "color": color})
         await manager._user_list()
-        # For DEV case, prefer final combined clamp state; otherwise use raw tag clamp state
-        to_report_trim = False
-        try:
-            to_report_trim = trimmed_final if _is_dev_user(manager, sub) else trimmed
-        except NameError:
-            to_report_trim = trimmed
+        # Report trimming if applied
+        to_report_trim = trimmed
         if to_report_trim:
             await _alert(ws, "INFO", f"Tag trimmed to {MAX_TAG_LABEL_LEN} chars")
-        await manager._system(f"{sub} was tagged {tag_text}", store=False)
+        await manager._system(f"{sub} was tagged {tag_text}", store=True)
         return True
 
     # /tag "username" "tag" [color] (admin/promoted/dev only for tagging others)
@@ -130,20 +124,15 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
             await _alert(ws, "INFO", "That tag is reserved")
             return True
         if _is_dev_user(manager, target):
-            # Preserve DEV and append the personal tag for self
-            combined = f"DEV) ({tag_text}"
-            combined, trimmed_final = _clamp_label(combined)
-            manager.tags[target] = {"text": combined, "color": "rainbow", "special": "dev"}
+            # DEV target: store only user's personal tag text; mark special but keep chosen color
+            manager.set_user_tag(target, {"text": tag_text, "color": color, "special": "dev"})
         else:
-            manager.tags[target] = {"text": tag_text, "color": color}
+            manager.set_user_tag(target, {"text": tag_text, "color": color})
         await manager._user_list()
-        try:
-            to_report_trim = trimmed_final if _is_dev_user(manager, target) else trimmed
-        except NameError:
-            to_report_trim = trimmed
+        to_report_trim = trimmed
         if to_report_trim:
             await _alert(ws, "INFO", f"Tag trimmed to {MAX_TAG_LABEL_LEN} chars")
-        await manager._system(f"{target} was tagged {tag_text}", store=False)
+        await manager._system(f"{target} was tagged {tag_text}", store=True)
         return True
 
     # /rmtag "username" (admin/dev) or /rmtag (self)
@@ -152,24 +141,35 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         is_admin = is_effective_admin(manager, sub)
         target_label = m.group(1)
         target = canonical_user(manager, target_label)
-        # Require online and enforce locks unless DEV
-        if target not in manager.active and target.lower() != sub.lower():
-            await _alert(ws, "INFO", f"{target_label} is not online")
+        # Permission: only self unless admin/dev
+        if target.lower() != sub.lower() and not is_admin:
+            await _alert(ws, "INFO", "You can only remove your own tag")
             return True
         if (target in manager.tag_locks) and not _is_dev_user(manager, sub):
             await _alert(ws, "INFO", "User's tag is locked (DEV only)")
             return True
-        if _is_dev_user(manager, target) and target.lower() != sub.lower():
-            await _alert(ws, "INFO", "Cannot modify DEV user's tag")
-            return True
+        # Admin cannot touch other admins; DEV can modify anyone
+        if target.lower() != sub.lower():
+            if not _is_dev_user(manager, sub):
+                # Non-DEV admin: disallow if target is admin
+                try:
+                    if is_effective_admin(manager, target):
+                        await _alert(ws, "INFO", "Cannot modify another admin's tag")
+                        return True
+                except Exception:
+                    pass
+            # Never allow modifying DEV user by non-DEV
+            if _is_dev_user(manager, target) and not _is_dev_user(manager, sub):
+                await _alert(ws, "INFO", "Cannot modify DEV user's tag")
+                return True
         if target in manager.tags:
             if _is_dev_user(manager, target):
                 # Revert to base DEV tag
-                manager.tags[target] = {"text": "DEV", "color": "rainbow", "special": "dev"}
-                await manager._system(f"{target} removed their tag", store=False)
+                manager.set_user_tag(target, {"text": "DEV", "color": "rainbow", "special": "dev"})
+                await manager._system(f"{target} removed their tag", store=True)
             else:
-                manager.tags.pop(target, None)
-                await manager._system(f"{target} tag cleared", store=False)
+                manager.clear_user_tag(target)
+                await manager._system(f"{target} tag cleared", store=True)
             await manager._user_list()
         else:
             await _alert(ws, "INFO", "User has no tag")
@@ -183,13 +183,13 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         if sub in manager.tags:
             if _is_dev_user(manager, sub):
                 # Revert to base DEV tag
-                manager.tags[sub] = {"text": "DEV", "color": "rainbow", "special": "dev"}
+                manager.set_user_tag(sub, {"text": "DEV", "color": "rainbow", "special": "dev"})
                 await manager._user_list()
-                await manager._system(f"{sub} removed their tag", store=False)
+                await manager._system(f"{sub} removed their tag", store=True)
             else:
-                manager.tags.pop(sub, None)
+                manager.clear_user_tag(sub)
                 await manager._user_list()
-                await manager._system(f"{sub} removed their tag", store=False)
+                await manager._system(f"{sub} removed their tag", store=True)
         else:
             await _alert(ws, "INFO", "You have no tag")
         return True
@@ -198,13 +198,13 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
     if re.match(r'^\s*/rjtag\s*$', txt, re.I):
         manager.tag_rejects.add(sub)
         await manager._user_list()
-        await manager._system(f"{sub} rejects being tagged by others", store=False)
+        await manager._system(f"{sub} rejects being tagged by others", store=True)
         return True
 
     if re.match(r'^\s*/ac(?:p)?tag\s*$', txt, re.I):
         manager.tag_rejects.discard(sub)
         await manager._user_list()
-        await manager._system(f"{sub} accepts being tagged by others", store=False)
+        await manager._system(f"{sub} accepts being tagged by others", store=True)
         return True
 
     if re.match(r'^\s*/tag', txt, re.I):

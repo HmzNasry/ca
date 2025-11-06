@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import TextareaAutosize from "react-textarea-autosize";
-import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown, Ban, LogOut, Users } from "lucide-react";
+import { Paperclip, Send, Loader2, Smile, Trash2, ChevronDown, Ban, LogOut, Pencil, CornerDownLeft, MoreHorizontal, X } from "lucide-react";
+import EmojiPicker, { Theme as EmojiTheme } from "emoji-picker-react";
 import EmojiConvertor from "emoji-js";
 import AlertModal from "@/components/AlertModal";
 
@@ -25,6 +26,11 @@ import YouTubePreview from "./YouTubePreview";
 import PsaModal from "./modals/PsaModal";
 import PassModal from "./modals/PassModal";
 import MuteAllModal from "./modals/MuteAllModal";
+import UsersModal from "./modals/UsersModal";
+import ResetModal from "./modals/ResetModal";
+import AccountModal from "./modals/AccountModal";
+import AdminAccountModal from "./modals/AdminAccountModal";
+import PollModal from "./modals/PollModal";
 
 export function ChatInterface({ token, onLogout }: { token: string; onLogout: () => void }) {
   
@@ -89,7 +95,110 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const [kickAllConfirm, setKickAllConfirm] = useState(false);
   const [unmuteAllConfirm, setUnmuteAllConfirm] = useState(false);
   const [muteAllOpen, setMuteAllOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [clearMainConfirm, setClearMainConfirm] = useState(false);
+  const [clearGcConfirm, setClearGcConfirm] = useState(false);
+  const [usersRegOpen, setUsersRegOpen] = useState(false);
+  const [usersRegList, setUsersRegList] = useState<string[]>([]);
+  const [adminAcctOpen, setAdminAcctOpen] = useState(false);
+  const [adminAcctUser, setAdminAcctUser] = useState<string | null>(null);
+  const [pollOpen, setPollOpen] = useState(false);
+  // New: reply / edit state
+  const [replyTo, setReplyTo] = useState<{ id: string; sender: string; text: string } | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState<string>("");
+  const [reactionPickerFor, setReactionPickerFor] = useState<string | null>(null);
+  // Track recent edits to reconcile servers that re-emit edits as new messages
+  const recentEditsRef = useRef<Array<{ oldId: string; sender: string; text: string; threadKey: string; time: number }>>([]);
+
+  // Normalize text for robust edit reconciliation (collapse whitespace, trim)
+  const normText = (s?: string) => {
+    if (typeof s !== 'string') return '';
+    return s
+      .replace(/[\u200B-\u200D\uFEFF]/g, '') // zero-width chars
+      .replace(/\s+/g, ' ') // collapse whitespace/newlines
+      .trim();
+  };
+  const textsMatch = (a?: string, b?: string) => {
+    const na = normText(a); const nb = normText(b);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    const shorter = na.length < nb.length ? na : nb;
+    const longer = na.length < nb.length ? nb : na;
+    const ratio = shorter.length / Math.max(longer.length, 1);
+    return (ratio >= 0.8) && (longer.includes(shorter));
+  };
+
+  // Shorten helper for reply preview with explicit ellipsis
+  const shortenReply = (s?: string, mobileMax = 28, desktopMax = 42) => {
+    const t = (s || '').replace(/\s+/g, ' ').trim();
+    const max = (typeof window !== 'undefined' ? (window.innerWidth < 640) : false) ? mobileMax : desktopMax;
+    if (t.length <= max) return t;
+    return t.slice(0, Math.max(0, max - 1)) + '…';
+  };
+  // Absolute overlay position for emoji picker
+  const [reactionPickerPos, setReactionPickerPos] = useState<{ top: number; left: number } | null>(null);
+  // Mobile: per-message action tray toggler
+  const [showTrayFor, setShowTrayFor] = useState<string | null>(null);
+  // Close action tray when clicking anywhere outside or pressing Escape
+  useEffect(() => {
+    if (!showTrayFor) return;
+    const onDown = (e: MouseEvent | TouchEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (!t.closest('.msg-tray') && !t.closest('.msg-dots')) {
+        setShowTrayFor(null);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowTrayFor(null); };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('touchstart', onDown, { passive: true } as any);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('touchstart', onDown as any);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [showTrayFor]);
+  // Helper: ensure messages list has unique ids (keep first occurrence)
+  const uniqueById = useCallback((arr: any[]) => {
+    const seenIds = new Set<string>();
+    const out: any[] = [];
+    for (const it of arr) {
+      try {
+        const sid = it && it.id != null ? String(it.id) : '';
+        if (sid) {
+          if (seenIds.has(sid)) continue;
+          seenIds.add(sid);
+        }
+      } catch {}
+      out.push(it);
+    }
+    return out;
+  }, []);
+
+  const openReactionPicker = (e: React.MouseEvent, mid: string) => {
+    try {
+      const W = 280, H = 380, pad = 8;
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const preferredTop = rect.top - H - 8;
+      const top = preferredTop >= pad ? preferredTop : Math.min(window.innerHeight - H - pad, rect.bottom + 8);
+      const leftCenter = rect.left + rect.width / 2 - W / 2;
+      const left = Math.min(Math.max(leftCenter, pad), window.innerWidth - W - pad);
+      setReactionPickerPos({ top, left });
+      setReactionPickerFor(mid);
+    } catch {
+      setReactionPickerFor(mid);
+    }
+  };
+  const closeReactionPicker = () => { setReactionPickerFor(null); setReactionPickerPos(null); };
+
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') closeReactionPicker(); };
+    if (reactionPickerFor) window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [reactionPickerFor]);
 
   const ws = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -431,11 +540,19 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const textRaw2 = d.text || "";
   const t2 = (textRaw2 || "").trim().replace(/[.]+$/, "");
   const text = t2 ? t2[0].toUpperCase() + t2.slice(1) : t2;
-        const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT" || code === "DUPLICATE";
+        const shouldLogout = code === "KICKED" || code === "BANNED" || code === "BANNED_CONNECT" || code === "DUPLICATE" || code === "ACCOUNT_DELETED" || code === "REMOVED" || code === "RESET";
         if (code === "DUPLICATE") {
           try {
             localStorage.removeItem("chat-username");
             localStorage.setItem("chat-login-error", "Username already online. Pick a different name.");
+          } catch {}
+        }
+        if (code === "ACCOUNT_DELETED" || code === "REMOVED") {
+          try { localStorage.removeItem("chat-username"); } catch {}
+        }
+        if (code === "RESET") {
+          try {
+            localStorage.removeItem("chat-username");
           } catch {}
         }
         showAlert(text, shouldLogout ? () => onLogout() : undefined);
@@ -476,6 +593,21 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         setUnmuteOpen(true);
         return;
       }
+      // Users registry prompt (DEV)
+      if (d.type === "users_prompt" && Array.isArray(d.users)) {
+        setUsersRegList(d.users);
+        setUsersRegOpen(true);
+        return;
+      }
+      if (d.type === "poll_prompt") {
+        setPollOpen(true);
+        return;
+      }
+      // Reset prompt (DEV)
+      if (d.type === "reset_prompt") {
+        setResetOpen(true);
+        return;
+      }
       if (d.type === "gc_prompt") {
         setMakeGcOpen(true);
         return;
@@ -484,8 +616,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       // GC history
       if (d.type === "gc_history" && Array.isArray(d.items)) {
         seen.current.clear();
-        d.items.forEach((x: any) => x?.id && seen.current.add(x.id));
-        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && x.id).filter(Boolean));
+        d.items.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
+        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && String(x.id)).filter(Boolean));
         forceScrollRef.current = true; // scroll to latest
         return setMessages(d.items);
       }
@@ -582,17 +714,81 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       if (d.type === "delete" && d.id) {
         if (d.thread === "dm") {
           if (activeDmRef.current === d.peer) {
-            setMessages(prev => prev.filter(m => m.id !== d.id));
+            setMessages(prev => prev.filter(m => String(m.id) !== String(d.id)));
           }
         } else if (d.thread === 'gc') {
           if (activeGcRef.current === d.gcid) {
-            setMessages(prev => prev.filter(m => m.id !== d.id));
+            setMessages(prev => prev.filter(m => String(m.id) !== String(d.id)));
           }
         } else {
           if (activeDmRef.current === null) {
-            setMessages(prev => prev.filter(m => m.id !== d.id));
+            setMessages(prev => prev.filter(m => String(m.id) !== String(d.id)));
           }
         }
+        return;
+      }
+
+  // Handle message text edits
+  if (d.type === "message_update" && d.id != null) {
+        const isGC = d.thread === 'gc' && typeof d.gcid === 'string';
+        const isDM = d.thread === 'dm' && typeof d.peer === 'string';
+        const isMain = !d.thread || d.thread === 'main';
+        if (isGC && activeGcRef.current !== d.gcid) return;
+        if (isDM && activeDmRef.current !== d.peer) return;
+        if (isMain && (activeDmRef.current !== null || !!activeGcRef.current)) return;
+        setMessages(prev => uniqueById(prev.map(m => (String(m.id) === String(d.id) ? { ...m, text: d.text, edited: true } : m))));
+        return;
+      }
+
+      // Handle reaction updates
+  if (d.type === "reaction_update" && d.id != null) {
+        const isGC = d.thread === 'gc' && typeof d.gcid === 'string';
+        const isDM = d.thread === 'dm' && typeof d.peer === 'string';
+        const isMain = !d.thread || d.thread === 'main';
+        if (isGC && activeGcRef.current !== d.gcid) return;
+        if (isDM && activeDmRef.current !== d.peer) return;
+        if (isMain && (activeDmRef.current !== null || !!activeGcRef.current)) return;
+        let author: string | null = null;
+        let title = '';
+        let body = '';
+        const isHidden = typeof document !== 'undefined' && document.hidden;
+        setMessages(prev => uniqueById(prev.map(m => {
+          if (String(m.id) !== String(d.id)) return m;
+          const prevReacts = m.reactions || {};
+          const nextReacts = d.reactions || {};
+          // find any newly added username
+          try {
+            for (const emo of Object.keys(nextReacts)) {
+              const before = new Set<string>(prevReacts[emo] || []);
+              for (const u of nextReacts[emo] || []) {
+                if (!before.has(u) && u !== me) {
+                  author = u;
+                  title = `${u} reacted${isGC ? ` in ${gcsRef.current.find(x=>x.id===d.gcid)?.name || 'Group'}` : isDM ? ` in DM` : ' (Main)'} `;
+                  body = `${emo} to your message`;
+                  break;
+                }
+              }
+              if (author) break;
+            }
+          } catch {}
+          return { ...m, reactions: nextReacts };
+  })));
+        // Notify if someone reacted to my message and I'm not on that thread or tab is hidden
+        if (author) {
+          const amAuthor = (() => {
+            try { const msg = messages.find(x => String(x.id) === String(d.id)); return msg && msg.sender === me; } catch { return false; }
+          })();
+          if (amAuthor) {
+            const offThread = (isGC && activeGcRef.current !== d.gcid) || (isDM && activeDmRef.current !== d.peer) || (isMain && (activeDmRef.current !== null || !!activeGcRef.current));
+            if (offThread || isHidden) notify(title || 'New reaction', body || '');
+          }
+        }
+        return;
+      }
+
+      // Flash ping: highlight a specific message id for me
+  if (d.type === 'flash' && d.id != null) {
+        setFlashMap(prev => ({ ...prev, [d.id]: true }));
         return;
       }
 
@@ -612,15 +808,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       // Histories
       if (d.type === "history" && Array.isArray(d.items)) {
         seen.current.clear();
-        d.items.forEach((x: any) => x?.id && seen.current.add(x.id));
-        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && x.id).filter(Boolean));
+        d.items.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
+        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && String(x.id)).filter(Boolean));
         forceScrollRef.current = true; // scroll to latest after loading history
         return setMessages(d.items);
       }
       if (d.type === "dm_history" && Array.isArray(d.items)) {
         seen.current.clear();
-        d.items.forEach((x: any) => x?.id && seen.current.add(x.id));
-        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && x.id).filter(Boolean));
+        d.items.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
+        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && String(x.id)).filter(Boolean));
         forceScrollRef.current = true; // scroll to latest after loading dm history
         return setMessages(d.items);
       }
@@ -643,6 +839,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
             setMessages(prev => prev.map(m => (batch[m.id] !== undefined ? { ...m, text: batch[m.id] } : m)));
           }, 50);
         }
+        return;
+      }
+
+      // Poll updates are incremental
+  if (d.type === "poll_update" && d.id != null) {
+  setMessages(prev => uniqueById(prev.map(m => (String(m.id) === String(d.id) ? { ...m, counts: d.counts, total_voters: d.total_voters, votes: d.votes || m.votes } : m))));
         return;
       }
 
@@ -695,7 +897,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         // Only render spinner and AI responses in the correct thread
         if ((isGC && activeGcRef.current === d.gcid) || (isDM && activeDmRef.current === d.peer) || (isMain && activeDmRef.current === null && !activeGcRef.current)) {
           setMessages(prev => {
-            const idx = prev.findIndex(m => m.id === d.id);
+            const idx = prev.findIndex(m => String(m.id) === String(d.id));
             if (idx !== -1) {
               const copy = [...prev];
               const old = copy[idx];
@@ -830,16 +1032,55 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         return setMessages(p => [...p, { ...d, text: txt }]);
       }
 
-      // Final fallback: only append to the currently active thread timeline
-      if (d.id && seen.current.has(d.id)) return;
-      const isMain = !activeDmRef.current && !activeGcRef.current;
-      const okForMain = (!d.thread || d.thread === 'main') && isMain;
-      const okForDm = (d.thread === 'dm' && d.peer === activeDmRef.current);
-      const okForGc = (d.thread === 'gc' && d.gcid === activeGcRef.current);
-      if (okForMain || okForDm || okForGc) {
-        if (d.id) seen.current.add(d.id);
-        setMessages(p => [...p, d]);
-      }
+      // Final fallback: merge-or-append in a single state update to avoid race duplicates
+      setMessages(prev => {
+        // First, reconcile servers that re-emit edits as brand-new 'message' events.
+        // If this payload matches a very recent edit from me in this thread, merge it onto the original id.
+        try {
+          const hasText = typeof d.text === 'string' && d.text.length > 0;
+          if ((d.type === 'message' || d.type === 'media') && hasText) {
+            const tk = (d.thread === 'gc' && d.gcid) ? `gc:${d.gcid}` : (d.thread === 'dm' && d.peer) ? `dm:${d.peer}` : 'main';
+            // Match by thread and robust text comparison within time window; prefer same-sender hits
+            const candidates = recentEditsRef.current.filter(e => e.threadKey === tk && (Date.now() - e.time) < 30000 && textsMatch(e.text, d.text));
+            // Prefer exact same sender if available
+            const hit = candidates.find(e => String(e.sender) === String(d.sender)) || candidates[0];
+            if (hit) {
+              const idx = prev.findIndex(m => String(m.id) === String(hit.oldId));
+              if (idx !== -1) {
+                const copy = prev.slice();
+                // Replace old message inplace using new payload; ensure it's marked edited
+                copy[idx] = { ...copy[idx], ...d, edited: true } as any;
+                // Evict consumed mapping
+                recentEditsRef.current = recentEditsRef.current.filter(e => e !== hit);
+                return uniqueById(copy);
+              }
+            }
+          }
+        } catch {}
+
+        // If this payload has an id that already exists, merge it in place
+        if (d.id) {
+          const idx = prev.findIndex(m => m && String(m.id) === String(d.id));
+          if (idx !== -1) {
+            const copy = prev.slice();
+            copy[idx] = { ...copy[idx], ...d } as any;
+            return uniqueById(copy);
+          }
+          // If we've already seen this id (history or earlier append), don't add again
+          if (seen.current.has(String(d.id))) return prev;
+        }
+
+        // Gate by active thread before appending
+        const isMain = !activeDmRef.current && !activeGcRef.current;
+        const okForMain = (!d.thread || d.thread === 'main') && isMain;
+        const okForDm = (d.thread === 'dm' && d.peer === activeDmRef.current);
+        const okForGc = (d.thread === 'gc' && d.gcid === activeGcRef.current);
+        if (okForMain || okForDm || okForGc) {
+          if (d.id) seen.current.add(String(d.id));
+          return uniqueById([...prev, d]);
+        }
+        return prev;
+      });
     };
 
     return () => {
@@ -850,6 +1091,19 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       if (muteIntervalRef.current) { window.clearInterval(muteIntervalRef.current); muteIntervalRef.current = null; }
     };
   }, [token]);
+
+  // Global Esc handlers: cancel reply when open
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (replyTo) {
+          setReplyTo(null);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [replyTo]);
 
   // Reset unread counts and request history when switching threads
   // Always request correct history when switching threads
@@ -929,6 +1183,20 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     try { if (el) observerRef.current?.unobserve(el); } catch {}
   }, []);
 
+  // Scroll to a message by id and flash it briefly
+  const scrollToMessage = useCallback((id: string) => {
+    try {
+      const el = messageRefs.current[id];
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setFlashMap(prev => ({ ...prev, [id]: true }));
+        window.setTimeout(() => {
+          setFlashMap(prev => { const c = { ...prev }; delete (c as any)[id]; return c; });
+        }, 2000);
+      }
+    } catch {}
+  }, []);
+
   const isAiAnywhere = (t: string) => /^\s*@ai\b/i.test(t); // revert to only at start
   const extractAiPrompt = (t: string) => {
     const m = t.match(/^\s*@ai\b(.*)$/i);
@@ -936,6 +1204,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   };
 
   const send = async () => {
+    if (editingId) return; // Don't send a new message while editing inline
     if (sending) return;
     let txt = input.trim();
     if (!txt && files.length === 0) return;
@@ -981,6 +1250,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         setInput("");
         return;
       }
+      // /clear in GC: confirm
+      if (/^\s*\/clear\s*$/i.test(txt) && !!activeGcRef.current) {
+        setClearGcConfirm(true);
+        setInput("");
+        return;
+      }
       // /ban: open modal if no user specified
       if (/^\s*\/ban\b/i.test(txt)) {
         const okFull = /^\s*\/ban\s+"[^"]+"\s*$/i.test(txt);
@@ -1016,6 +1291,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           setInput("");
           return;
         }
+      }
+      // /account: open account modal
+      if (/^\s*\/account\s*$/i.test(txt)) {
+        setAccountOpen(true);
+        setInput("");
+        return;
       }
       // /mute: open modal if missing args
       if (/^\s*\/mute\b/i.test(txt)) {
@@ -1077,6 +1358,30 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         setInput("");
         return;
       }
+      // DEV-only: /users -> request registry list
+      if (isDevMe && /^\s*\/users\b/i.test(txt)) {
+        const okFull = /^\s*\/users\s*$/i.test(txt);
+        if (!okFull || okFull) {
+          try { ws.current?.send(JSON.stringify({ text: '/users' })); } catch {}
+          setInput("");
+          return;
+        }
+      }
+      // /poll -> open modal (anyone can create polls; keep here so admin intercept doesn't block)
+      if (/^\s*\/poll\s*$/i.test(txt)) {
+        setPollOpen(true);
+        setInput("");
+        return;
+      }
+      // DEV-only: /reset -> require superpass modal if missing args
+      if (isDevMe && /^\s*\/reset\b/i.test(txt)) {
+        const okFull = /^\s*\/reset\s+"[^\"]+"\s*$/i.test(txt);
+        if (!okFull) {
+          setResetOpen(true);
+          setInput("");
+          return;
+        }
+      }
       if (isDevMe && /^\s*\/muteA\b/i.test(txt)) {
         const okFull = /^\s*\/muteA\s+\d+\s*$/i.test(txt);
         if (!okFull) {
@@ -1100,6 +1405,19 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         setInput("");
         return;
       }
+    }
+
+    // /account: open self account modal for everyone
+    if (/^\s*\/account\s*$/i.test(txt)) {
+      setAccountOpen(true);
+      setInput("");
+      return;
+    }
+    // /poll for non-admins too
+    if (/^\s*\/poll\s*$/i.test(txt)) {
+      setPollOpen(true);
+      setInput("");
+      return;
     }
 
     // Intercept admin-only commands for non-admins and show modal instead of sending
@@ -1204,6 +1522,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           ws.current?.send(JSON.stringify({ text: input, ...threadPayload }));
         }
         setInput("");
+        setReplyTo(null);
         setFiles([]);
         setShowPicker(false);
       } catch {
@@ -1222,7 +1541,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     try {
       if (txt && files.length > 0) {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-          ws.current.send(JSON.stringify({ text: txt, ...threadPayload }));
+          const extra = replyTo ? { reply_to_id: replyTo.id } : {};
+          ws.current.send(JSON.stringify({ text: txt, ...threadPayload, ...extra }));
         } else {
           throw new Error("socket not connected");
         }
@@ -1233,7 +1553,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         }
       } else if (txt) {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-          ws.current.send(JSON.stringify({ text: txt, ...threadPayload }));
+          const extra = replyTo ? { reply_to_id: replyTo.id } : {};
+          ws.current.send(JSON.stringify({ text: txt, ...threadPayload, ...extra }));
         } else {
           throw new Error("socket not connected");
         }
@@ -1248,6 +1569,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       showAlert("Failed to send message or upload file(s)");
     } finally {
       setInput("");
+      setReplyTo(null);
       setFiles([]);
       setShowPicker(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -1257,8 +1579,72 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   };
 
   const deleteMsg = (id: string) => {
-  const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {} as any);
-    ws.current?.send(JSON.stringify({ text: `/delete ${id}`, ...threadPayload }));
+    const threadPayload = activeGcRef.current
+      ? { thread: 'gc', gcid: activeGcRef.current }
+      : (activeDmRef.current
+        ? { thread: 'dm', peer: activeDmRef.current }
+        : { thread: 'main' } as any);
+    try {
+      ws.current?.send(JSON.stringify({ type: 'delete_message', id, ...threadPayload }));
+    } catch {}
+  };
+
+  
+
+  // New: start reply to a message
+  const startReply = (m: any) => {
+    const text = (m.type === 'message' ? (m.text || '') : (m.type === 'media' ? '[media]' : m.type === 'poll' ? '[poll]' : '')).toString();
+    setReplyTo({ id: m.id, sender: m.sender, text: text.length > 120 ? text.slice(0, 120) : text });
+    try { txtRef.current?.focus(); } catch {}
+  };
+
+  // New: send a reaction (toggle)
+  const reactTo = (id: string, emoji: string) => {
+    // Enforce 5 unique reactions client-side too
+    const msg = messages.find(m => m.id === id);
+    const keys = msg && msg.reactions ? Object.keys(msg.reactions) : [];
+    if (keys && emoji && !keys.includes(emoji) && keys.length >= 5) {
+      showAlert("You can only add up to 5 reactions");
+      return;
+    }
+    // Optimistic UI: toggle my reaction locally for snappy UX
+    setMessages(prev => prev.map(m => {
+      if (m.id !== id) return m;
+      const map = (m.reactions && typeof m.reactions === 'object') ? { ...m.reactions } : {} as Record<string, string[]>;
+      const arr = new Set<string>(Array.isArray(map[emoji]) ? map[emoji] : []);
+      if (arr.has(me)) arr.delete(me); else arr.add(me);
+      map[emoji] = Array.from(arr).sort();
+      // prune empty emoji buckets
+      Object.keys(map).forEach(k => { if (!map[k] || map[k].length === 0) delete map[k]; });
+      return { ...m, reactions: map };
+    }));
+    const payload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: 'dm', peer: activeDmRef.current } : { thread: 'main' } as any);
+    try { ws.current?.send(JSON.stringify({ type: 'react_message', id, emoji, ...payload })); } catch {}
+  };
+
+  // New: edit message inline save/cancel
+  const beginEdit = (m: any) => {
+    setEditingId(m.id);
+    setEditingText(m.text || '');
+  };
+  const cancelEdit = () => { setEditingId(null); setEditingText(''); };
+  const saveEdit = () => {
+    if (!editingId) return;
+    // Proper in-place edit to avoid duplicate messages
+    const payload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: 'dm', peer: activeDmRef.current } : {} as any);
+    try { ws.current?.send(JSON.stringify({ type: 'edit_message', id: editingId, text: editingText, ...payload })); } catch {}
+    // Optimistic in-place update so the UI reflects immediately
+  setMessages(prev => uniqueById(prev.map(m => String(m.id) === String(editingId) ? { ...m, text: editingText, edited: true } : m)));
+    // Record this edit so if the server sends a fresh 'message' instead of 'message_update',
+    // we can merge it back onto the original instead of appending a duplicate
+    const threadKey = activeGcRef.current ? `gc:${activeGcRef.current}` : (activeDmRef.current ? `dm:${activeDmRef.current}` : 'main');
+    try {
+      recentEditsRef.current.push({ oldId: String(editingId), sender: me, text: String(editingText), threadKey, time: Date.now() });
+      // keep only the last few seconds of edits
+      recentEditsRef.current = recentEditsRef.current.filter(e => Date.now() - e.time < 15000).slice(-20);
+    } catch {}
+    setEditingId(null);
+    setEditingText('');
   };
 
   const createGc = (name: string, members: string[]) => {
@@ -1377,6 +1763,52 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     } catch {}
   }, [playPing]);
 
+  // Render a poll message with options, progress bars, and vote action
+  const renderPoll = useCallback((m: any, threadPayload: any) => {
+    const counts: number[] = Array.isArray(m.counts) ? m.counts : [];
+    const opts: string[] = Array.isArray(m.options) ? m.options : [];
+    const total = Math.max(0, counts.reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0));
+    const totalPossible = typeof m.total_possible === 'number' ? m.total_possible : undefined;
+    const myChoice = (() => {
+      try { const v = m.votes && typeof m.votes === 'object' ? m.votes[me] : undefined; return typeof v === 'number' ? v : -1; } catch { return -1; }
+    })();
+    const vote = (idx: number) => {
+      try {
+        ws.current?.send(JSON.stringify({ type: 'vote_poll', poll_id: m.id, choice: idx, ...threadPayload }));
+      } catch {}
+    };
+    return (
+  <div className="relative inline-block max-w-[50vw] sm:max-w-[70ch] pt-2 -mt-2">
+        <div className="rounded-2xl px-4 py-3 bg-[#111827]/80 text-[#f7f3e8] border border-white/10 w-full">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-semibold text-blue-400">Poll by {m.sender}</div>
+            <div className="text-xs text-white/70">{total}/{totalPossible ?? '—'}</div>
+          </div>
+          <div className="text-[15px] font-medium mb-3">{m.question || ''}</div>
+          <div className="space-y-2">
+            {opts.map((label, i) => {
+              const c = counts[i] || 0;
+              const pct = total > 0 ? Math.round((c * 100) / total) : 0;
+              const mine = myChoice === i;
+              return (
+                <button key={i} type="button" onClick={() => vote(i)}
+                  className={`w-full text-left rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition p-2 ${mine ? 'ring-2 ring-blue-400/70' : ''}`}>
+                  <div className="flex items-center justify-between text-xs text-white/80">
+                    <span>{label}</span>
+                    <span>{c} • {pct}%</span>
+                  </div>
+                  <div className="mt-1 h-2 rounded-full bg-white/10 overflow-hidden">
+                    <div className="h-full bg-white/90" style={{ width: `${pct}%` }} />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }, [me]);
+
   // Track last DM toast visibility
   const [dmToast, setDmToast] = useState<{ user: string; id: number } | null>(null);
   const [mentionToast, setMentionToast] = useState<{ where: 'main' | 'gc'; label: string; gcid?: string; id: number } | null>(null);
@@ -1417,7 +1849,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const [userActivity, setUserActivity] = useState<Record<string, boolean>>({});
 
   return (
-    <div className="flex h-screen bg-black text-[#f7f3e8] overflow-hidden relative">
+  <div className="flex h-[100svh] bg-black text-[#f7f3e8] overflow-hidden relative">
       {/* utilities */}
       <style>{`
         /* hide scrollbars but keep scroll */
@@ -1477,7 +1909,6 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     open={tagOpen}
     me={me}
     users={users}
-    admins={admins}
     tagsMap={tagsMap}
     tagLocks={Array.from(tagLocks)}
     isAdminEffective={isAdminEffective}
@@ -1487,6 +1918,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         const hexFlag = hex ? ` -#${hex.replace(/^#/,'')}` : '';
         const who = (!isAdminEffective || target === me) ? 'myself' : target;
         const cmd = `/tag "${who}" "${label}"${hexFlag}`;
+        const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {});
+        ws.current?.send(JSON.stringify({ text: cmd, ...threadPayload }));
+      } catch {}
+    }}
+    onClear={(target: string) => {
+      try {
+        const who = (!isAdminEffective || target === me) ? me : target;
+        const quoted = (who === me && !isAdminEffective) ? '' : ` "${who}"`;
+        const cmd = `/rmtag${quoted}`;
         const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: "dm", peer: activeDmRef.current } : {});
         ws.current?.send(JSON.stringify({ text: cmd, ...threadPayload }));
       } catch {}
@@ -1577,6 +2017,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     open={rmtagOpen}
     me={me}
     users={users}
+    admins={admins}
     tagsMap={tagsMap}
     isAdminEffective={isAdminEffective}
     isDevEffective={isDevMe}
@@ -1623,6 +2064,13 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     onCancel={() => setClearMainConfirm(false)}
     onOk={() => { try { ws.current?.send(JSON.stringify({ text: '/clear' })); } catch {} setClearMainConfirm(false); }}
   />
+  <ConfirmModal
+    open={clearGcConfirm}
+    title="Clear this group chat?"
+    body="This will remove all messages from this group for everyone."
+    onCancel={() => setClearGcConfirm(false)}
+    onOk={() => { const gcid = activeGcRef.current; if (gcid) { try { ws.current?.send(JSON.stringify({ text: '/clear', thread: 'gc', gcid })); } catch {} } setClearGcConfirm(false); }}
+  />
   {/* DEV-only utilities */}
   <PsaModal
     open={psaOpen}
@@ -1645,6 +2093,40 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     open={muteAllOpen}
     onClose={() => setMuteAllOpen(false)}
     onSubmit={(n: number) => { try { ws.current?.send(JSON.stringify({ text: `/muteA ${n}` })); } catch {} }}
+  />
+  <ResetModal
+    open={resetOpen}
+    onClose={() => setResetOpen(false)}
+    onSubmit={(sp: string) => { try { ws.current?.send(JSON.stringify({ text: `/reset "${sp}"` })); } catch {} }}
+  />
+  <AccountModal
+    open={accountOpen}
+    token={token}
+    onClose={() => setAccountOpen(false)}
+    onUpdated={(newTok: string) => { try { localStorage.setItem("chat-token", newTok); } catch {}; location.reload(); }}
+  />
+  <UsersModal
+    open={usersRegOpen}
+    users={usersRegList}
+    onClose={() => setUsersRegOpen(false)}
+    mode="pick"
+    onPick={(u: string) => { setAdminAcctUser(u); setAdminAcctOpen(true); }}
+    onSubmit={(_sel: string[]) => { /* not used in pick mode */ }}
+  />
+  <PollModal
+    open={pollOpen}
+    onClose={() => setPollOpen(false)}
+    onCreate={(question: string, options: string[]) => {
+      const threadPayload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: 'dm', peer: activeDmRef.current } : {});
+      try { ws.current?.send(JSON.stringify({ type: 'create_poll', question, options, ...threadPayload })); } catch {}
+    }}
+  />
+  <AdminAccountModal
+    open={adminAcctOpen}
+    token={token}
+    username={adminAcctUser || ""}
+    onClose={() => { setAdminAcctOpen(false); setAdminAcctUser(null); }}
+    onSaved={() => { /* could refresh list or notify */ }}
   />
   <ConfirmModal
     open={unmuteAllConfirm}
@@ -1684,7 +2166,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       <>
                         {amCreator && (
                           <button
-                            onClick={() => ws.current?.send(JSON.stringify({ text: '/clear', thread: 'gc', gcid: activeGc }))}
+                            onClick={() => setClearGcConfirm(true)}
                             className="ml-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl bg-red-600/90 hover:bg-red-700 text-white shadow-[0_0_10px_rgba(255,0,0,0.3)] transition-all"
                           >
                             <Trash2 className="h-3.5 w-3.5" /> Clear GC
@@ -1743,7 +2225,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           
         </div>
 
-        <div ref={chatScrollRef} className="flex-1 p-6 overflow-y-auto overflow-x-hidden no-scrollbar">
+  <div ref={chatScrollRef} className="flex-1 min-h-0 p-6 overflow-y-auto overflow-x-hidden no-scrollbar">
           <div ref={messageListRef}>
           {activeGc ? (
             <>
@@ -1773,7 +2255,18 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const tagVal = (tagsMap as any)[m.sender];
                 const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
                 return (
-                  <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
+                  <div
+                    key={m.id}
+                    className={`flex w-full group/message ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}
+                    onMouseDownCapture={(e) => {
+                      if (showTrayFor === m.id) {
+                        const t = e.target as HTMLElement;
+                        if (!t.closest('.msg-tray') && !t.closest('.msg-dots')) {
+                          setShowTrayFor(null);
+                        }
+                      }
+                    }}
+                  >
                     <div
                       ref={(el) => {
                         animateIn(el);
@@ -1784,7 +2277,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       }}
                       onMouseEnter={() => stopFlashing(m.id)}
                       onClick={() => stopFlashing(m.id)}
-                      className={`relative max-w-[95%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
+                      className={`relative max-w-[95%] inline-flex flex-col ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
                       style={shouldFlash ? { animation: "flash-red 1.6s ease-in-out infinite", borderColor: "rgba(239,68,68,0.85)", padding: "0.16rem" } : undefined}
                     >
                       {first && (
@@ -1793,35 +2286,168 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (
+                                  <>
+                                    {isDevSender && <span className="dev-rainbow font-semibold"> (DEV)</span>}
+                                    {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                                  </>
+                                ); })()}
                                 {tagObj && (() => {
                                   const c = (tagObj as any).color as string | undefined;
-                                  const isDev = (tagObj as any).special === 'dev' || c === 'rainbow';
+                                  const label = String((tagObj as any).text || "");
+                                  if (!label || label.toUpperCase() === 'DEV') return null;
                                   const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
-                                  if (isDev) return <span className={`dev-rainbow font-semibold`}> ({tagObj.text})</span>;
-                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({tagObj.text})</span>;
-                                  return <span className={`${colorClass(c)} font-semibold`}> ({tagObj.text})</span>;
+                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
+                                  return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                                 })()}
                               </>
                             )}
                           </span>
-                          <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}</span>
+                          <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}{m.edited ? ' · edited' : ''}</span>
                         </div>
                       )}
 
                       {/* AI spinner when text is empty (match DM/Main) */}
                       {m.type === "message" && m.sender === "AI" && !(m.text && m.text.trim()) && (
-                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[85vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[50vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                            <span className="inline-flex items-center gap-2 text-[#cfc7aa]">
                              Generating Response <Loader2 className="h-4 w-4 animate-spin" />
                            </span>
                          </div>
                        )}
                       {m.type === "message" && !(showUrlImg || showUrlVid) && !(m.sender === "AI" && !(m.text && m.text.trim())) && (
-                        <div className="relative inline-block max-w-[85vw] sm:max-w-[70ch]">
-                          <div className={`rounded-2xl px-4 py-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
-                            {renderRichText(displayText || "")}
+                        <div className="relative inline-block max-w-[50vw] sm:max-w-[70ch] pt-2 -mt-2">
+                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                            {m.reply_to && (
+                              <div className="mb-2 flex items-center gap-2">
+                                <button
+                                  onClick={() => scrollToMessage(m.reply_to.id)}
+                                  className={`flex-1 min-w-0 text-left text-[11px] ${mine ? 'bg-black/10 text-[#1c1c1c]/80' : 'bg-white/10 text-[#f7f3e8]/80'} border border-white/10 rounded-xl px-2 py-1`}
+                                >
+                                  <span className="font-semibold">{m.reply_to.sender}</span>: <span className="truncate align-top block max-w-[28ch] sm:max-w-[42ch]" title={m.reply_to.text}>{shortenReply(m.reply_to.text)}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => scrollToMessage(m.reply_to.id)}
+                                  title="Go to replied message"
+                                  className="shrink-0 p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                >
+                                  <CornerDownLeft className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            )}
+                            {editingId === m.id ? (
+                              <div className="space-y-2">
+                                <TextareaAutosize
+                                  value={editingText}
+                                  onChange={e=>setEditingText(e.target.value)}
+                                  onKeyDown={e => {
+                                    e.stopPropagation();
+                                    if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(); }
+                                  }}
+                                  className="w-full bg-transparent border border-white/20 rounded-md px-2 py-1 text-sm text-inherit"
+                                />
+                                <div className="flex gap-2 justify-end">
+                                  <button onClick={cancelEdit} className="text-xs text-black">Cancel</button>
+                                  <button onClick={saveEdit} className="text-xs text-black px-2 py-0.5 rounded">Save</button>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                {renderRichText(displayText || "")}
+                                {m.edited && (
+                                  <span className="ml-1 inline-block align-baseline text-[10px] font-medium opacity-70 select-none">(edited)</span>
+                                )}
+                              </>
+                            )}
+                            {/* Desktop (xl+): tray anchored to bubble to prevent vertical drift from reaction rows */}
+                            <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
+                              <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
+                                <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                {mine && m.type === 'message' && (
+                                  <button type="button" onClick={() => { beginEdit(m); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
+                                )}
+                                <button type="button"
+                                  onClick={(e) => {
+                                    const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                    if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                    openReactionPicker(e, m.id);
+                                  }}
+                                  title="React"
+                                  className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                >
+                                  <Smile className="h-3.5 w-3.5" />
+                                </button>
+                                {canDelete && (
+                                  <button type="button" onClick={() => { deleteMsg(m.id); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /></button>
+                                )}
+                              </div>
+                            </div>
                           </div>
+                          {/* Mobile actions toggle + anchored popover (outside bubble to avoid clipping) */}
+                          <div className={`xl:hidden absolute top-0 ${alignRight ? 'right-0 translate-x-1' : 'left-0 -translate-x-1'} z-30`}>
+                            <button
+                              type="button"
+                              onClick={() => setShowTrayFor(prev => prev === m.id ? null : m.id)}
+                              className="msg-dots group p-0.5 rounded-full bg-black/60 text-[#e7dec3] ring-1 ring-white/10"
+                              aria-label={showTrayFor === m.id ? "Close actions" : "Message actions"}
+                            >
+                              <span className="relative block h-4 w-4">
+                                <MoreHorizontal className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out ${showTrayFor === m.id ? 'opacity-0 scale-75' : 'opacity-100 scale-100'}`} />
+                                <X className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out transform ${showTrayFor === m.id ? 'opacity-100 scale-100 group-hover:rotate-90' : 'opacity-0 scale-75'}`} />
+                              </span>
+                            </button>
+                            {showTrayFor === m.id && (
+                              <>
+                                <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
+                                  <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
+                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    {mine && m.type === 'message' && (
+                                      <button type="button" onClick={() => { beginEdit(m); setShowTrayFor(null); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
+                                    )}
+                                    <button type="button"
+                                      onClick={(e) => {
+                                        const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                        if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                        setShowTrayFor(null);
+                                        openReactionPicker(e, m.id);
+                                      }}
+                                      title="React"
+                                      className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                    >
+                                      <Smile className="h-3.5 w-3.5" />
+                                    </button>
+                                    {canDelete && (
+                                      <button type="button" onClick={() => { deleteMsg(m.id); setShowTrayFor(null); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /></button>
+                                    )}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          
+                          
+                          {/* Reactions row */}
+                          {m.reactions && Object.values(m.reactions).some((arr: any) => Array.isArray(arr) && arr.length > 0) && (
+                            <div className="mt-1.5 flex items-center gap-1">
+                              {Object.keys(m.reactions).map((emo: any) => {
+                                const users: string[] = m.reactions[emo] || [];
+                                if (!users.length) return null;
+                                const mineReact = users.includes(me);
+                                const title = `${users.join(', ')} reacted`;
+                                return (
+                                  <button key={emo} title={title} onClick={() => reactTo(m.id, emo)} className={`px-2 py-0.5 rounded-full text-xs border ${mineReact ? 'bg-white/20 border-white/30' : 'bg-white/10 border-white/10'} text-[#e7dec3]`}>{emo} {users.length}</button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {m.type === "poll" && (
+                        <div className="relative">
+                          {renderPoll(m, { thread: 'gc', gcid: activeGcRef.current })}
                           {canDelete && (
                             <button onClick={() => deleteMsg(m.id)} title="Delete" className={`absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto`}>
                               <Trash2 className="h-3 w-3" strokeWidth={2.25} />
@@ -1833,9 +2459,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {m.type === "message" && (showUrlImg || showUrlVid) && (
                         <div className="relative">
                           {showUrlImg ? (
-                            <img src={firstUrl!} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={firstUrl!} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : (
-                            <video src={firstUrl!} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={firstUrl!} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           )}
                           {canDelete && (
                             <button onClick={() => deleteMsg(m.id)} title="Delete" className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto">
@@ -1845,22 +2471,109 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                         </div>
                       )}
 
-                      {/* Media message (image/video/audio) */}
+                      {/* Media message (image/video/audio) with actions + reactions */}
                       {m.type === "media" && (
-                        <div className="relative">
+                        <div className="relative inline-block">
                           {isImage ? (
-                            <img src={full(m.url)} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={full(m.url)} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : isVideo ? (
-                            <video src={full(m.url)} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={full(m.url)} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : isAudio ? (
                             <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
                           ) : (
                             <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
                           )}
-                          {canDelete && (
-                            <button onClick={() => deleteMsg(m.id)} title="Delete" className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto">
-                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                          {/* Mobile actions toggle + anchored popover */}
+                          <div className={`xl:hidden absolute top-0 ${alignRight ? 'right-0 translate-x-1' : 'left-0 -translate-x-1'} z-30`}>
+                            <button
+                              type="button"
+                              onClick={() => setShowTrayFor(prev => prev === m.id ? null : m.id)}
+                              className="msg-dots group p-0.5 rounded-full bg-black/60 text-[#e7dec3] ring-1 ring-white/10"
+                              aria-label={showTrayFor === m.id ? "Close actions" : "Message actions"}
+                            >
+                              <span className="relative block h-4 w-4">
+                                <MoreHorizontal className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out ${showTrayFor === m.id ? 'opacity-0 scale-75' : 'opacity-100 scale-100'}`} />
+                                <X className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out transform ${showTrayFor === m.id ? 'opacity-100 scale-100 group-hover:rotate-90' : 'opacity-0 scale-75'}`} />
+                              </span>
                             </button>
+                            {showTrayFor === m.id && (
+                              <>
+                                <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
+                                  <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
+                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    <button type="button"
+                                      onClick={(e) => {
+                                        const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                        if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                        setShowTrayFor(null);
+                                        openReactionPicker(e, m.id);
+                                      }}
+                                      title="React"
+                                      className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                    >
+                                      <Smile className="h-3.5 w-3.5" />
+                                    </button>
+                                    {canDelete && (
+                                      <button type="button" onClick={() => { deleteMsg(m.id); setShowTrayFor(null); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /></button>
+                                    )}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          {/* Desktop (xl+): side action tray on hover (DM media) */}
+                          <div className="hidden xl:block absolute top-1 right-0 z-20">
+                            <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
+                              <button onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3 w-3" /></button>
+                              <button
+                                onClick={(e) => {
+                                  const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                  if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                  openReactionPicker(e, m.id);
+                                }}
+                                title="React"
+                                className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                              >
+                                <Smile className="h-3 w-3" />
+                              </button>
+                              {canDelete && (
+                                <button onClick={() => { deleteMsg(m.id); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3 w-3" strokeWidth={2.25} /></button>
+                              )}
+                            </div>
+                          </div>
+                          {/* Desktop (xl+): side action tray on hover (GC media) */}
+                          <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
+                            <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
+                              <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                              <button type="button"
+                                onClick={(e) => {
+                                  const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                  if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                  openReactionPicker(e, m.id);
+                                }}
+                                title="React"
+                                className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                              >
+                                <Smile className="h-3.5 w-3.5" />
+                              </button>
+                              {canDelete && (
+                                <button type="button" onClick={() => { deleteMsg(m.id); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /></button>
+                              )}
+                            </div>
+                          </div>
+                          {/* Reactions row */}
+                          {m.reactions && Object.values(m.reactions).some((arr: any) => Array.isArray(arr) && arr.length > 0) && (
+                            <div className="mt-1.5 flex items-center gap-1">
+                              {Object.keys(m.reactions).map((emo: any) => {
+                                const users: string[] = m.reactions[emo] || [];
+                                if (!users.length) return null;
+                                const mineReact = users.includes(me);
+                                const title = `${users.join(', ')} reacted`;
+                                return (
+                                  <button key={emo} title={title} onClick={() => reactTo(m.id, emo)} className={`px-2 py-0.5 rounded-full text-xs border ${mineReact ? 'bg-white/20 border-white/30' : 'bg-white/10 border-white/10'} text-[#e7dec3]`}>{emo} {users.length}</button>
+                                );
+                              })}
+                            </div>
                           )}
                         </div>
                       )}
@@ -1913,7 +2626,18 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const tagVal = (tagsMap as any)[m.sender];
                 const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
                 return (
-                  <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
+                  <div
+                    key={m.id}
+                    className={`flex w-full group/message ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}
+                    onMouseDownCapture={(e) => {
+                      if (showTrayFor === m.id) {
+                        const t = e.target as HTMLElement;
+                        if (!t.closest('.msg-tray') && !t.closest('.msg-dots')) {
+                          setShowTrayFor(null);
+                        }
+                      }
+                    }}
+                  >
                     <div
                       ref={(el) => {
                         animateIn(el);
@@ -1924,7 +2648,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       }}
                       onMouseEnter={() => stopFlashing(m.id)}
                       onClick={() => stopFlashing(m.id)}
-                      className={`relative max-w-[95%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
+                      className={`relative max-w-[95%] inline-flex flex-col ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
                       style={shouldFlash ? { animation: "flash-red 1.6s ease-in-out infinite", borderColor: "rgba(239,68,68,0.85)", padding: "0.16rem" } : undefined}
                     >
                       {first && (
@@ -1933,35 +2657,169 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (
+                                  <>
+                                    {isDevSender && <span className="dev-rainbow font-semibold"> (DEV)</span>}
+                                    {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                                  </>
+                                ); })()}
                                 {tagObj && (() => {
                                   const c = (tagObj as any).color as string | undefined;
-                                  const isDev = (tagObj as any).special === 'dev' || c === 'rainbow';
+                                  const label = String((tagObj as any).text || "");
+                                  if (!label || label.toUpperCase() === 'DEV') return null;
                                   const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
-                                  if (isDev) return <span className={`dev-rainbow font-semibold`}> ({(tagObj as any).text})</span>;
-                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({(tagObj as any).text})</span>;
-                                  return <span className={`${colorClass(c)} font-semibold`}> ({(tagObj as any).text})</span>;
+                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
+                                  return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                                 })()}
                               </>
                             )}
                           </span>
-                          <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}</span>
+                          <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}{m.edited ? ' · edited' : ''}</span>
                         </div>
                       )}
 
                       {/* AI spinner when text is empty */}
                       {m.type === "message" && m.sender === "AI" && !(m.text && m.text.trim()) && (
-                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[85vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[50vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                            <span className="inline-flex items-center gap-2 text-[#cfc7aa]">
                              Generating Response <Loader2 className="h-4 w-4 animate-spin" />
                            </span>
                          </div>
                        )}
                       {m.type === "message" && !(showUrlImg || showUrlVid) && !(m.sender === "AI" && !(m.text && m.text.trim())) && (
-                        <div className="relative inline-block max-w-[85vw] sm:max-w-[70ch]">
-                          <div className={`rounded-2xl px-4 py-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
-                            {renderRichText(displayText || "")}
+                        <div className="relative inline-block max-w-[50vw] sm:max-w-[70ch] pt-2 -mt-2">
+                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                            {m.reply_to && (
+                              <div className="mb-2 flex items-center gap-2">
+                                <button
+                                  onClick={() => scrollToMessage(m.reply_to.id)}
+                                  className={`flex-1 min-w-0 text-left text-[11px] ${mine ? 'bg-black/10 text-[#1c1c1c]/80' : 'bg-white/10 text-[#f7f3e8]/80'} border border-white/10 rounded-xl px-2 py-1`}
+                                >
+                                  <span className="font-semibold">{m.reply_to.sender}</span>: <span className="truncate align-top block max-w-[28ch] sm:max-w-[42ch]" title={m.reply_to.text}>{shortenReply(m.reply_to.text)}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => scrollToMessage(m.reply_to.id)}
+                                  title="Go to replied message"
+                                  className="shrink-0 p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                >
+                                  <CornerDownLeft className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            )}
+                            {editingId === m.id ? (
+                              <div className="space-y-2">
+                                <TextareaAutosize
+                                  value={editingText}
+                                  onChange={e=>setEditingText(e.target.value)}
+                                  onKeyDown={e => {
+                                    e.stopPropagation();
+                                    if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(); }
+                                  }}
+                                  className="w-full bg-transparent border border-white/20 rounded-md px-2 py-1 text-sm text-inherit"
+                                />
+                                <div className="flex gap-2 justify-end">
+                                  <button type="button" onClick={cancelEdit} className="text-xs text-black">Cancel</button>
+                                  <button type="button" onClick={saveEdit} className="text-xs text-black px-2 py-0.5 rounded">Save</button>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                {renderRichText(displayText || "")}
+                                {m.edited && (
+                                  <span className="ml-1 inline-block align-baseline text-[10px] font-medium opacity-70 select-none">(edited)</span>
+                                )}
+                              </>
+                            )}
+                            {/* Desktop (xl+): tray anchored to bubble (DM text) to prevent vertical drift */}
+                            <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
+                              <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
+                                <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                <button type="button"
+                                  onClick={(e) => {
+                                    const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                    if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                    openReactionPicker(e, m.id);
+                                  }}
+                                  title="React"
+                                  className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                >
+                                  <Smile className="h-3.5 w-3.5" />
+                                </button>
+                                {mine && m.type === 'message' && (
+                                  <button type="button" onClick={() => { beginEdit(m); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
+                                )}
+                                {canDelete && (
+                                  <button type="button" onClick={() => { deleteMsg(m.id); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /></button>
+                                )}
+                              </div>
+                            </div>
                           </div>
+                          {/* Mobile actions toggle + anchored popover (outside bubble to avoid clipping) */}
+                          <div className={`xl:hidden absolute top-0 ${alignRight ? 'right-0 translate-x-1' : 'left-0 -translate-x-1'} z-30`}>
+                            <button
+                              type="button"
+                              onClick={() => setShowTrayFor(prev => prev === m.id ? null : m.id)}
+                              className="msg-dots group p-0.5 rounded-full bg-black/60 text-[#e7dec3] ring-1 ring-white/10"
+                              aria-label={showTrayFor === m.id ? "Close actions" : "Message actions"}
+                            >
+                              <span className="relative block h-4 w-4">
+                                <MoreHorizontal className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out ${showTrayFor === m.id ? 'opacity-0 scale-75' : 'opacity-100 scale-100'}`} />
+                                <X className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out transform ${showTrayFor === m.id ? 'opacity-100 scale-100 group-hover:rotate-90' : 'opacity-0 scale-75'}`} />
+                              </span>
+                            </button>
+                            {showTrayFor === m.id && (
+                              <>
+                                <div className="fixed inset-0 z-20" onClick={() => setShowTrayFor(null)} />
+                                <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
+                                  <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
+                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    <button type="button"
+                                      onClick={(e) => {
+                                        const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                        if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                        setShowTrayFor(null);
+                                        openReactionPicker(e, m.id);
+                                      }}
+                                      title="React"
+                                      className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                    >
+                                      <Smile className="h-3.5 w-3.5" />
+                                    </button>
+                                    {mine && m.type === 'message' && (
+                                      <button type="button" onClick={() => { beginEdit(m); setShowTrayFor(null); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
+                                    )}
+                                    {canDelete && (
+                                      <button type="button" onClick={() => { deleteMsg(m.id); setShowTrayFor(null); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /></button>
+                                    )}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          
+                          
+                          {/* Reactions row */}
+                          {m.reactions && Object.values(m.reactions).some((arr: any) => Array.isArray(arr) && arr.length > 0) && (
+                            <div className="mt-1.5 flex items-center gap-1">
+                              {Object.keys(m.reactions).map((emo: any) => {
+                                const users: string[] = m.reactions[emo] || [];
+                                if (!users.length) return null;
+                                const mineReact = users.includes(me);
+                                const title = `${users.join(', ')} reacted`;
+                                return (
+                                  <button key={emo} title={title} onClick={() => reactTo(m.id, emo)} className={`px-2 py-0.5 rounded-full text-xs border ${mineReact ? 'bg-white/20 border-white/30' : 'bg-white/10 border-white/10'} text-[#e7dec3]`}>{emo} {users.length}</button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {m.type === "poll" && (
+                        <div className="relative">
+                          {renderPoll(m, { thread: 'dm', peer: activeDmRef.current })}
                           {canDelete && (
                             <button
                               onClick={() => deleteMsg(m.id)}
@@ -1984,9 +2842,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {m.type === "message" && (showUrlImg || showUrlVid) && (
                         <div className="relative">
                           {showUrlImg ? (
-                            <img src={firstUrl!} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={firstUrl!} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : (
-                            <video src={firstUrl!} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={firstUrl!} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           )}
                           {canDelete && (
                             <button
@@ -2000,26 +2858,70 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                         </div>
                       )}
 
-                      {/* Media message (image/video/audio) */}
+                      {/* Media message (image/video/audio) with actions + reactions */}
                       {m.type === "media" && (
-                        <div className="relative">
+                        <div className="relative inline-block">
                           {isImage ? (
-                            <img src={full(m.url)} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={full(m.url)} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : isVideo ? (
-                            <video src={full(m.url)} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={full(m.url)} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : isAudio ? (
                             <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
                           ) : (
                             <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
                           )}
-                          {canDelete && (
+                          {/* Mobile actions toggle + anchored popover; desktop shows on hover via separate tray below */}
+                          <div className={`xl:hidden absolute top-0 ${alignRight ? 'right-0 translate-x-1' : 'left-0 -translate-x-1'} z-30`}>
                             <button
-                              onClick={() => deleteMsg(m.id)}
-                              title="Delete"
-                              className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto"
+                              type="button"
+                              onClick={() => setShowTrayFor(prev => prev === m.id ? null : m.id)}
+                              className="msg-dots group p-0.5 rounded-full bg-black/60 text-[#e7dec3] ring-1 ring-white/10"
+                              aria-label={showTrayFor === m.id ? "Close actions" : "Message actions"}
                             >
-                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                              <span className="relative block h-4 w-4">
+                                <MoreHorizontal className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out ${showTrayFor === m.id ? 'opacity-0 scale-75' : 'opacity-100 scale-100'}`} />
+                                <X className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out transform ${showTrayFor === m.id ? 'opacity-100 scale-100 group-hover:rotate-90' : 'opacity-0 scale-75'}`} />
+                              </span>
                             </button>
+                            {showTrayFor === m.id && (
+                              <>
+                                <div className="fixed inset-0 z-20" onClick={() => setShowTrayFor(null)} />
+                                <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
+                                  <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
+                                    <button onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3 w-3" /></button>
+                                    <button
+                                      onClick={(e) => {
+                                        const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                        if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                        setShowTrayFor(null);
+                                        openReactionPicker(e, m.id);
+                                      }}
+                                      title="React"
+                                      className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                    >
+                                      <Smile className="h-3 w-3" />
+                                    </button>
+                                    {canDelete && (
+                                      <button onClick={() => { deleteMsg(m.id); setShowTrayFor(null); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3 w-3" strokeWidth={2.25} /></button>
+                                    )}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          {/* Reactions row */}
+                          {m.reactions && Object.values(m.reactions).some((arr: any) => Array.isArray(arr) && arr.length > 0) && (
+                            <div className="mt-1.5 flex items-center gap-1">
+                              {Object.keys(m.reactions).map((emo: any) => {
+                                const users: string[] = m.reactions[emo] || [];
+                                if (!users.length) return null;
+                                const mineReact = users.includes(me);
+                                const title = `${users.join(', ')} reacted`;
+                                return (
+                                  <button key={emo} title={title} onClick={() => reactTo(m.id, emo)} className={`px-2 py-0.5 rounded-full text-xs border ${mineReact ? 'bg-white/20 border-white/30' : 'bg-white/10 border-white/10'} text-[#e7dec3]`}>{emo} {users.length}</button>
+                                );
+                              })}
+                            </div>
                           )}
                         </div>
                       )}
@@ -2071,7 +2973,18 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                 const tagVal = (tagsMap as any)[m.sender];
                 const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
                 return (
-                  <div key={m.id} className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}>
+                  <div
+                    key={m.id}
+                    className={`flex w-full group/message ${alignRight ? "justify-end" : "justify-start"} ${first && i !== 0 ? "mt-3" : ""} mb-2`}
+                    onMouseDownCapture={(e) => {
+                      if (showTrayFor === m.id) {
+                        const t = e.target as HTMLElement;
+                        if (!t.closest('.msg-tray') && !t.closest('.msg-dots')) {
+                          setShowTrayFor(null);
+                        }
+                      }
+                    }}
+                  >
                     <div
                       ref={(el) => {
                         animateIn(el);
@@ -2082,7 +2995,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       }}
                       onMouseEnter={() => stopFlashing(m.id)}
                       onClick={() => stopFlashing(m.id)}
-                      className={`relative max-w-[95%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
+                      className={`relative max-w-[95%] inline-flex flex-col ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
                       style={shouldFlash ? { animation: "flash-red 1.6s ease-in-out infinite", borderColor: "rgba(239,68,68,0.85)", padding: "0.16rem" } : undefined}
                     >
                       {first && (
@@ -2091,35 +3004,169 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null; })()}
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (
+                                  <>
+                                    {isDevSender && <span className="dev-rainbow font-semibold"> (DEV)</span>}
+                                    {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                                  </>
+                                ); })()}
                                 {tagObj && (() => {
                                   const c = (tagObj as any).color as string | undefined;
-                                  const isDev = (tagObj as any).special === 'dev' || c === 'rainbow';
+                                  const label = String((tagObj as any).text || "");
+                                  if (!label || label.toUpperCase() === 'DEV') return null;
                                   const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
-                                  if (isDev) return <span className={`dev-rainbow font-semibold`}> ({tagObj.text})</span>;
-                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({tagObj.text})</span>;
-                                  return <span className={`${colorClass(c)} font-semibold`}> ({tagObj.text})</span>;
+                                  if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
+                                  return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                                 })()}
                               </>
                             )}
                           </span>
-                          <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}</span>
+                          <span className="text-xs text-[#b5ad94]">{fmtTime(m.timestamp)}{m.edited ? ' · edited' : ''}</span>
                         </div>
                       )}
 
                       {/* AI spinner when text is empty */}
                       {m.type === "message" && m.sender === "AI" && !(m.text && m.text.trim()) && (
-                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[85vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[50vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                            <span className="inline-flex items-center gap-2 text-[#cfc7aa]">
                              Generating Response <Loader2 className="h-4 w-4 animate-spin" />
                            </span>
                          </div>
                        )}
                       {m.type === "message" && !(showUrlImg || showUrlVid) && !(m.sender === "AI" && !(m.text && m.text.trim())) && (
-                        <div className="relative inline-block max-w-[85vw] sm:max-w-[70ch]">
-                          <div className={`rounded-2xl px-4 py-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
-                            {renderRichText(displayText || "")}
+                        <div className="relative inline-block max-w-[50vw] sm:max-w-[70ch] pt-2 -mt-2">
+                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                            {m.reply_to && (
+                              <div className="mb-2 flex items-center gap-2">
+                                <button
+                                  onClick={() => scrollToMessage(m.reply_to.id)}
+                                  className={`flex-1 min-w-0 text-left text-[11px] ${mine ? 'bg-black/10 text-[#1c1c1c]/80' : 'bg-white/10 text-[#f7f3e8]/80'} border border-white/10 rounded-xl px-2 py-1`}
+                                >
+                                  <span className="font-semibold">{m.reply_to.sender}</span>: <span className="truncate align-top block max-w-[28ch] sm:max-w-[42ch]" title={m.reply_to.text}>{shortenReply(m.reply_to.text)}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => scrollToMessage(m.reply_to.id)}
+                                  title="Go to replied message"
+                                  className="shrink-0 p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                >
+                                  <CornerDownLeft className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            )}
+                            {editingId === m.id ? (
+                              <div className="space-y-2">
+                                <TextareaAutosize
+                                  value={editingText}
+                                  onChange={e=>setEditingText(e.target.value)}
+                                  onKeyDown={e => {
+                                    e.stopPropagation();
+                                    if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(); }
+                                  }}
+                                  className="w-full bg-transparent border border-white/20 rounded-md px-2 py-1 text-sm text-inherit"
+                                />
+                                <div className="flex gap-2 justify-end">
+                                  <button type="button" onClick={cancelEdit} className="text-xs text-black">Cancel</button>
+                                  <button type="button" onClick={saveEdit} className="text-xs text-black px-2 py-0.5 rounded">Save</button>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                {renderRichText(displayText || "")}
+                                {m.edited && (
+                                  <span className="ml-1 inline-block align-baseline text-[10px] font-medium opacity-70 select-none">(edited)</span>
+                                )}
+                              </>
+                            )}
+                            {/* Desktop (xl+): tray anchored to bubble (Main text) */}
+                            <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
+                              <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
+                                <button onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                {mine && m.type === 'message' && (
+                                  <button onClick={() => { beginEdit(m); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
+                                )}
+                                <button
+                                  onClick={(e) => {
+                                    const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                    if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                    openReactionPicker(e, m.id);
+                                  }}
+                                  title="React"
+                                  className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                >
+                                  <Smile className="h-3.5 w-3.5" />
+                                </button>
+                                {canDelete && (
+                                  <button onClick={() => { deleteMsg(m.id); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /></button>
+                                )}
+                              </div>
+                            </div>
                           </div>
+                          {/* Mobile actions toggle + anchored popover (outside bubble to avoid clipping) */}
+                          <div className={`xl:hidden absolute top-0 ${alignRight ? 'right-0 translate-x-1' : 'left-0 -translate-x-1'} z-30`}>
+                            <button
+                              type="button"
+                              onClick={() => setShowTrayFor(prev => prev === m.id ? null : m.id)}
+                              className="msg-dots group p-0.5 rounded-full bg-black/60 text-[#e7dec3] ring-1 ring-white/10"
+                              aria-label={showTrayFor === m.id ? "Close actions" : "Message actions"}
+                            >
+                              <span className="relative block h-4 w-4">
+                                <MoreHorizontal className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out ${showTrayFor === m.id ? 'opacity-0 scale-75' : 'opacity-100 scale-100'}`} />
+                                <X className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out transform ${showTrayFor === m.id ? 'opacity-100 scale-100 group-hover:rotate-90' : 'opacity-0 scale-75'}`} />
+                              </span>
+                            </button>
+                            {showTrayFor === m.id && (
+                              <>
+                                <div className="fixed inset-0 z-20" onClick={() => setShowTrayFor(null)} />
+                                <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
+                                  <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
+                                    <button onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    {mine && m.type === 'message' && (
+                                      <button onClick={() => { beginEdit(m); setShowTrayFor(null); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
+                                    )}
+                                    <button
+                                      onClick={(e) => {
+                                        const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                        if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                        setShowTrayFor(null);
+                                        openReactionPicker(e, m.id);
+                                      }}
+                                      title="React"
+                                      className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                    >
+                                      <Smile className="h-3.5 w-3.5" />
+                                    </button>
+                                    {canDelete && (
+                                      <button onClick={() => { deleteMsg(m.id); setShowTrayFor(null); }} title="Delete" className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"><Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /></button>
+                                    )}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          
+                          
+                          {/* Reactions row */}
+                          {m.reactions && Object.values(m.reactions).some((arr: any) => Array.isArray(arr) && arr.length > 0) && (
+                            <div className="mt-1.5 flex items-center gap-1">
+                              {Object.keys(m.reactions).map((emo: any) => {
+                                const users: string[] = m.reactions[emo] || [];
+                                if (!users.length) return null;
+                                const mineReact = users.includes(me);
+                                const title = `${users.join(', ')} reacted`;
+                                return (
+                                  <button key={emo} title={title} onClick={() => reactTo(m.id, emo)} className={`px-2 py-0.5 rounded-full text-xs border ${mineReact ? 'bg-white/20 border-white/30' : 'bg-white/10 border-white/10'} text-[#e7dec3]`}>{emo} {users.length}</button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {m.type === "poll" && (
+                        <div className="relative">
+                          {renderPoll(m, { thread: 'main' })}
                           {canDelete && (
                             <button
                               onClick={() => deleteMsg(m.id)}
@@ -2142,9 +3189,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {m.type === "message" && (showUrlImg || showUrlVid) && (
                         <div className="relative">
                           {showUrlImg ? (
-                            <img src={firstUrl!} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={firstUrl!} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : (
-                            <video src={firstUrl!} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={firstUrl!} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           )}
                           {canDelete && (
                             <button
@@ -2158,26 +3205,102 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                         </div>
                       )}
 
-                      {/* Media message (image/video/audio) */}
+                      {/* Media message (image/video/audio) with actions + reactions */}
                       {m.type === "media" && (
-                        <div className="relative">
+                        <div className="relative inline-block">
                           {isImage ? (
-                            <img src={full(m.url)} className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={full(m.url)} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : isVideo ? (
-                            <video src={full(m.url)} controls className="max-w-[75vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={full(m.url)} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
                           ) : isAudio ? (
                             <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
                           ) : (
                             <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
                           )}
-                          {canDelete && (
+                          {/* Mobile actions toggle + anchored popover */}
+                          <div className={`xl:hidden absolute top-0 ${alignRight ? 'right-0 translate-x-1' : 'left-0 -translate-x-1'} z-30`}>
                             <button
-                              onClick={() => deleteMsg(m.id)}
-                              title="Delete"
-                              className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto"
+                              type="button"
+                              onClick={() => setShowTrayFor(prev => prev === m.id ? null : m.id)}
+                              className="msg-dots group p-0.5 rounded-full bg-black/60 text-[#e7dec3] ring-1 ring-white/10"
+                              aria-label={showTrayFor === m.id ? "Close actions" : "Message actions"}
                             >
-                              <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                              <span className="relative block h-4 w-4">
+                                <MoreHorizontal className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out ${showTrayFor === m.id ? 'opacity-0 scale-75' : 'opacity-100 scale-100'}`} />
+                                <X className={`absolute inset-0 h-4 w-4 transition-all duration-150 ease-out transform ${showTrayFor === m.id ? 'opacity-100 scale-100 group-hover:rotate-90' : 'opacity-0 scale-75'}`} />
+                              </span>
                             </button>
+                            {showTrayFor === m.id && (
+                              <>
+                                <div className="fixed inset-0 z-20" onClick={() => setShowTrayFor(null)} />
+                                <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
+                                  <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
+                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    <button type="button"
+                                      onClick={(e) => {
+                                        const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                        if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                        setShowTrayFor(null);
+                                        openReactionPicker(e, m.id);
+                                      }}
+                                      title="React"
+                                      className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                                    >
+                                      <Smile className="h-3.5 w-3.5" />
+                                    </button>
+                                    {canDelete && (
+                                      <button type="button"
+                                        onClick={() => { deleteMsg(m.id); setShowTrayFor(null); }}
+                                        title="Delete"
+                                        className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          {/* Desktop (xl+): side action tray on hover (Main media) */}
+                          <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
+                            <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
+                              <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                              <button type="button"
+                                onClick={(e) => {
+                                  const keys = m.reactions ? Object.keys(m.reactions) : [];
+                                  if (keys.length >= 5) { showAlert('You can only add up to 5 reactions'); return; }
+                                  openReactionPicker(e, m.id);
+                                }}
+                                title="React"
+                                className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"
+                              >
+                                <Smile className="h-3.5 w-3.5" />
+                              </button>
+                              {canDelete && (
+                                <button type="button"
+                                  onClick={() => { deleteMsg(m.id); }}
+                                  title="Delete"
+                                  className="p-1 rounded-full text-red-500 hover:bg-white/10 transition"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          {/* Reactions row */}
+                          {m.reactions && Object.values(m.reactions).some((arr: any) => Array.isArray(arr) && arr.length > 0) && (
+                            <div className="mt-1.5 flex items-center gap-1">
+                              {Object.keys(m.reactions).map((emo: any) => {
+                                const users: string[] = m.reactions[emo] || [];
+                                if (!users.length) return null;
+                                const mineReact = users.includes(me);
+                                const title = `${users.join(', ')} reacted`;
+                                return (
+                                  <button key={emo} title={title} onClick={() => reactTo(m.id, emo)} className={`px-2 py-0.5 rounded-full text-xs border ${mineReact ? 'bg-white/20 border-white/30' : 'bg-white/10 border-white/10'} text-[#e7dec3]`}>{emo} {users.length}</button>
+                                );
+                              })}
+                            </div>
                           )}
                         </div>
                       )}
@@ -2337,21 +3460,23 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
             </Button>
             {/* Input highlight overlay wrapper */}
             <div className="relative flex-1 min-w-0">
-              {/* Overlay that highlights @mentions in the input */}
-              <div
-                aria-hidden
-                className="pointer-events-none absolute inset-0 whitespace-pre-wrap break-words text-[#f7f3e8] overflow-hidden pr-16 sm:pr-12 z-0"
-                style={{ lineHeight: 1.5 }}
-              >
-                {input ? (
-                  <>{renderInputHighlight(input)}</>
-                ) : (
-                  <>
-                    <span className="text-[#b5ad94] hidden sm:inline">Type Message...</span>
-                    <span className="text-[#b5ad94] inline sm:hidden">Message...</span>
-                  </>
-                )}
-              </div>
+              {!isMobile && (
+                // Overlay that highlights @mentions in the input (desktop/tablet only)
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 whitespace-pre-wrap break-words text-[#f7f3e8] overflow-hidden pr-16 sm:pr-12 z-0"
+                  style={{ lineHeight: 1.5 }}
+                >
+                  {input ? (
+                    <>{renderInputHighlight(input)}</>
+                  ) : (
+                    <>
+                      <span className="text-[#b5ad94] hidden sm:inline">Type Message...</span>
+                      <span className="text-[#b5ad94] inline sm:hidden">Message...</span>
+                    </>
+                  )}
+                </div>
+              )}
               <TextareaAutosize
                 ref={txtRef}
                 value={input}
@@ -2360,9 +3485,22 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                   try { v = emoji.replace_colons(v); } catch {}
                   setInput(v);
                   pingTyping(v);
+                  if (isMobile) {
+                    // Keep caret/text visible inside the textarea on mobile as it grows
+                    try { setTimeout(() => { if (txtRef.current) txtRef.current.scrollTop = txtRef.current.scrollHeight; }, 0); } catch {}
+                  } else if (isAtBottomRef.current) {
+                    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+                  }
                 }}
                 onFocus={() => pingTyping(input)}
                 onBlur={() => {}}
+                onHeightChange={() => {
+                  if (isMobile) {
+                    try { if (txtRef.current) txtRef.current.scrollTop = txtRef.current.scrollHeight; } catch {}
+                  } else if (isAtBottomRef.current) {
+                    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+                  }
+                }}
                 onPaste={e => {
                   const items = e.clipboardData?.items;
                   if (!items) return;
@@ -2412,8 +3550,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                     send();
                   }
                 }}
-                className="relative z-10 w-full bg-transparent border-none resize-none focus:outline-none text-transparent caret-[#f7f3e8] pr-16 sm:pr-12 pointer-events-auto"
-                maxRows={5}
+                // On mobile, keep a single-line input with horizontal scroll and no phantom newlines
+                wrap={isMobile ? ("off" as any) : undefined}
+                className={`relative z-10 w-full bg-transparent border-none resize-none focus:outline-none ${isMobile ? 'text-[#f7f3e8] overflow-y-hidden overflow-x-auto whitespace-nowrap no-scrollbar' : 'text-transparent overflow-y-auto no-scrollbar'} caret-[#f7f3e8] pr-16 sm:pr-12 pointer-events-auto`}
+                style={isMobile ? undefined : undefined}
+                minRows={1}
+                maxRows={isMobile ? 1 : 5}
               />
             </div>
             <Button variant="ghost" type="button" onClick={() => setShowPicker(v => !v)}>
@@ -2427,6 +3569,32 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
               )}
             </Button>
           </form>
+          {/* Reply banner */}
+          {replyTo && (
+            <div className="mt-2 mx-1 px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-sm text-[#e7dec3] flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs text-[#cfc7aa]/80">Replying to {replyTo.sender}</div>
+                <div className="truncate">{replyTo.text}</div>
+              </div>
+              <button onClick={() => setReplyTo(null)} className="text-[#cfc7aa] hover:text-white text-xs ml-2 shrink-0">Cancel</button>
+            </div>
+          )}
+
+          {/* Global emoji picker overlay (fixed) */}
+          {reactionPickerFor && (
+            <>
+              <div className="fixed inset-0 z-[60]" onClick={closeReactionPicker} />
+              <div className="fixed z-[61]" style={{ top: reactionPickerPos?.top || 80, left: reactionPickerPos?.left || 80 }}>
+                <EmojiPicker
+                  theme={EmojiTheme.DARK}
+                  onEmojiClick={(e: any) => { const id = reactionPickerFor; closeReactionPicker(); if (id) reactTo(id, e.emoji || ''); }}
+                  lazyLoadEmojis
+                  width={280}
+                  height={380}
+                />
+              </div>
+            </>
+          )}
         </div>
       </main>
     </div>

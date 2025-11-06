@@ -109,13 +109,15 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
                     </span>
                     <span className={selected ? "text-black" : (isMeUser ? "text-blue-500 font-semibold" : "text-white")}>
                       {u}
-                      {isAdminUser && !isDev && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                      {isDev && <span className="dev-rainbow font-semibold"> (DEV)</span>}
+                      {isAdminUser && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
                       {tagObj && (() => {
                         const c = (tagObj as any).color as string | undefined;
+                        const label = String((tagObj as any).text || "");
+                        if (!label || label.toUpperCase() === 'DEV') return null; // base DEV badge is shown separately
                         const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
-                        if (isDev) return <span className={`dev-rainbow font-semibold`}> ({tagObj.text})</span>;
-                        if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({tagObj.text})</span>;
-                        return <span className={`${colorClass(c)} font-semibold`}> ({tagObj.text})</span>;
+                        if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
+                        return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                       })()}
                     </span>
                     <div className="absolute right-2 top-1/2 -translate-y-1/2">

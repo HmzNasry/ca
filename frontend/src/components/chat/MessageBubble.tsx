@@ -96,15 +96,20 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
                     const tv = (tagsMap as any)[m.sender];
                     const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null);
                     const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV'));
-                    return (admins.includes(m.sender) && !isDevSender) ? <span className="text-red-500 font-semibold"> (ADMIN)</span> : null;
+                    return (
+                      <>
+                        {isDevSender && <span className="dev-rainbow font-semibold"> (DEV)</span>}
+                        {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
+                      </>
+                    );
                   })()}
                   {tagObj && (() => {
                     const c = (tagObj as any).color as string | undefined;
-                    const isDev = (tagObj as any).special === 'dev' || c === 'rainbow';
+                    const label = String((tagObj as any).text || "");
+                    if (!label || label.toUpperCase() === 'DEV') return null;
                     const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
-                    if (isDev) return <span className={`dev-rainbow font-semibold`}> ({tagObj.text})</span>;
-                    if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({tagObj.text})</span>;
-                    return <span className={`${colorClass(c)} font-semibold`}> ({tagObj.text})</span>;
+                    if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
+                    return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                   })()}
                 </>
               )}
