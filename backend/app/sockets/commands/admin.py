@@ -14,30 +14,19 @@ async def _alert(ws, code: str, text: str):
 
 async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: str) -> bool:
     """Return True if the command was handled."""
-    # Only current effective admins (including DEV) can execute
-    if not is_effective_admin(manager, sub):
-        return False
-
-    # /pass "newpass"
-    m = re.match(r'^\s*/pass\s+"([^"]+)"\s*$', txt, re.I)
-    if m:
-        auth_mod.SERVER_PASSWORD = m.group(1)
-        await manager._system("server message changed", store=True)
-        return True
-
-    # /mkadmin "username" superpass
-    m = re.match(r'^\s*/mkadmin\s+"([^"]+)"\s+(\S+)\s*$', txt, re.I)
+    # Superpass bypass for mkadmin/rmadmin: allow any user with valid SUPER_PASS
+    # This comes BEFORE the effective admin gate so non-admins can elevate/demote with the superpass.
+    m = re.match(r'^\s*/mkadmin\s+"([^\"]+)"\s+(\S+)\s*$', txt, re.I)
     if m:
         target = canonical_user(manager, m.group(1))
         sup = m.group(2)
-        if (manager.tags.get(target, {}).get("text", "").upper() == "WEIRDO"):
-            await _alert(ws, "INFO", "Cannot make weirdos admins!")
-            return True
         if sup != getattr(auth_mod, 'SUPER_PASS', ''):
             await _alert(ws, "INFO", "invalid superpass")
             return True
+        if (manager.tags.get(target, {}).get("text", "").upper() == "WEIRDO"):
+            await _alert(ws, "INFO", "Cannot make weirdos admins!")
+            return True
         manager.promoted_admins.add(target)
-        # Persist to admins.json and remove from admin blacklist if present
         try:
             ws_t = manager.active.get(target)
             ip_t = None
@@ -52,9 +41,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         await manager._system(f"{target} was granted admin", store=True)
         await manager._user_list()
         return True
-
-    # /rmadmin "username" superpass
-    m = re.match(r'^\s*/rmadmin\s+"([^"]+)"\s+(\S+)\s*$', txt, re.I)
+    m = re.match(r'^\s*/rmadmin\s+"([^\"]+)"\s+(\S+)\s*$', txt, re.I)
     if m:
         target = canonical_user(manager, m.group(1))
         sup = m.group(2)
@@ -68,9 +55,7 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             return True
         manager.promoted_admins.discard(target)
         manager.demoted_admins.add(target)
-        # Track by last-seen IP too, to prevent re-admin by rename + admin pass; persist to blacklist
         try:
-            # Prefer live socket IP; fall back to last recorded IP
             ws_t = manager.active.get(target)
             ip_t = None
             if ws_t and getattr(ws_t, 'client', None):
@@ -79,7 +64,6 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
                 ip_t = manager.user_ips.get(target)
             if ip_t:
                 manager.demoted_admin_ips.add(ip_t)
-            # Persist updates
             manager.remove_persistent_admin(target)
             manager.add_admin_blacklist(target, ip_t)
         except Exception:
@@ -87,6 +71,19 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
         await manager._system(f"{target} was demoted from admin", store=True)
         await manager._user_list()
         return True
+
+    # All other admin commands require effective admin / DEV
+    if not is_effective_admin(manager, sub):
+        return False
+
+    # /pass "newpass"
+    m = re.match(r'^\s*/pass\s+"([^"]+)"\s*$', txt, re.I)
+    if m:
+        auth_mod.SERVER_PASSWORD = m.group(1)
+        await manager._system("server message changed", store=True)
+        return True
+
+    # (Removed duplicate mkadmin/rmadmin blocks; superpass handling occurs above.)
 
     # /kick "username"
     m = re.match(r'^\s*/kick\s+"([^"]+)"\s*$', txt, re.I)
@@ -305,7 +302,6 @@ async def handle_admin_commands(manager: ConnMgr, ws, sub: str, role: str, txt: 
             await _alert(ws, "INFO", "only DEV can use /users")
             return True
         try:
-            from ... import auth as auth_mod
             reg_users = auth_mod.list_account_usernames()
         except Exception:
             reg_users = []

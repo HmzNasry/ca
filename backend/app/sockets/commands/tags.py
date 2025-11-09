@@ -57,6 +57,8 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
             norm = _normalize_hex(f)
             return norm or 'white'
         # named color flag
+        if lf in {'-rainbow', '-rainbwo', '-rnbw'}:
+            return 'rainbow'
         return COLOR_FLAGS.get(lf, 'white')
 
     # /tag myself "tag" [color]
@@ -68,6 +70,10 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         color = _parse_color(color_flag)
         if tag_text.strip().lower() in {"dev", "admin"}:
             await _alert(ws, "INFO", "That tag is reserved")
+            return True
+        # Enforce rainbow only if DEV
+        if color == 'rainbow' and not _is_dev_user(manager, sub):
+            await _alert(ws, "INFO", "Only DEV can set rainbow tag")
             return True
         # Respect tag lock on self unless DEV
         if sub in manager.tag_locks and not _is_dev_user(manager, sub):
@@ -122,6 +128,10 @@ async def handle_tag_commands(manager: ConnMgr, ws, sub: str, role: str, txt: st
         color = _parse_color(color_flag)
         if tag_text.strip().lower() in {"dev", "admin"}:
             await _alert(ws, "INFO", "That tag is reserved")
+            return True
+        # Enforce rainbow only if DEV
+        if color == 'rainbow' and not _is_dev_user(manager, sub):
+            await _alert(ws, "INFO", "Only DEV can assign rainbow tag")
             return True
         if _is_dev_user(manager, target):
             # DEV target: store only user's personal tag text; mark special but keep chosen color
