@@ -11,6 +11,13 @@
 				"$eslint-stylish"
 			],
 			"group": "build"
+		},
+		{
+			"label": "Build frontend",
+			"type": "shell",
+			"command": "cd /data/chatapp/frontend && npm run build",
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

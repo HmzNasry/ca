@@ -188,27 +188,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       const left = Math.min(Math.max(leftCenter, pad), window.innerWidth - W - pad);
       setReactionPickerPos({ top, left });
       setReactionPickerFor(mid);
-    } catch {
-      setReactionPickerFor(mid);
-    }
+    } catch {}
   };
-  const closeReactionPicker = () => { setReactionPickerFor(null); setReactionPickerPos(null); };
 
-  useEffect(() => {
-    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') closeReactionPicker(); };
-    if (reactionPickerFor) window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [reactionPickerFor]);
-
-  const ws = useRef<WebSocket | null>(null);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-  const fileRef = useRef<HTMLInputElement | null>(null);
-  const txtRef = useRef<HTMLTextAreaElement | null>(null);
-  const seen = useRef<Set<string>>(new Set());
-  // track active thread in a ref for event handlers
-  const activeDmRef = useRef<string | null>(null);
-  useEffect(() => { activeDmRef.current = activeDm; }, [activeDm]);
-  const activeGcRef = useRef<string | null>(null);
   useEffect(() => { activeGcRef.current = activeGc; }, [activeGc]);
   // Track ids received from initial history to avoid flashing old mentions
   const historyIdsRef = useRef<Set<string>>(new Set());
@@ -219,6 +201,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   // Throttle AI streaming updates so UI remains responsive
   const aiPendingRef = useRef<Record<string, string>>({});
   const aiUpdateTimer = useRef<number | null>(null);
+  // Cache off-thread updates to apply on next history load for that thread
+  const pendingTextUpdatesRef = useRef<Record<string, { text: string; edited?: boolean }>>({});
+  const pendingReactionUpdatesRef = useRef<Record<string, { reactions: Record<string, string[]> }>>({});
 
   // Track message DOM nodes and flashing state for mention alerts
   const messageRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -274,29 +259,16 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   // Ask for notification permission on mount
   useEffect(() => {
     try {
-      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      if (Notification && Notification.permission === "default") {
         Notification.requestPermission().catch(() => {});
       }
     } catch {}
   }, []);
 
-  const fmtTime = (iso?: string) => {
-    if (!iso) return "";
-    try {
-      const d = new Date(iso);
-      return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    } catch { return ""; }
-  };
-
-  useEffect(() => {
-    typingUserRef.current = typingUser;
-  }, [typingUser]);
-
-  // Helpers to detect mentions of current user
-  const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Mention detection helper (extracted from corrupted block) – stable across renders
   const mentionsMe = useCallback((text: string) => {
-    if (!me || !text) return false;
-    const meEsc = escapeRegex(me);
+    if (!me) return false;
+    const meEsc = me.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
     // Match @me (word-bounded) or @"me" (quoted)
     const rePlain = new RegExp(`(^|\\s|[^\\w])@${meEsc}(?![\\w])`, "i");
     const reQuoted = new RegExp(`@"\\s*${meEsc}\\s*"`, "i");
@@ -613,13 +585,69 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         return;
       }
 
+      // Helper: reconcile history on load using recent edits (avoid old+new duplicates after thread switch)
+      const reconcileOnLoad = (items: any[], tk: string) => {
+        try {
+          const out: any[] = [];
+          const byId = new Map<string, any>();
+          // First pass: keep in arrival order, collapse by id
+          for (const it of items || []) {
+            const sid = it && it.id != null ? String(it.id) : '';
+            if (sid && !byId.has(sid)) {
+              byId.set(sid, { ...it });
+            } else if (!sid) {
+              out.push({ ...it });
+            }
+          }
+          const base = [...out, ...Array.from(byId.values())];
+          // Second pass: apply recent edit mapping in this thread, preferring edited=true content
+          const edits = (recentEditsRef.current || []).filter(e => e.threadKey === tk && (Date.now() - e.time) < 30000);
+          for (const e of edits) {
+            // Find a candidate message whose text matches the edited text and from same sender
+            const idx = base.findIndex(m => m && typeof m.text === 'string' && textsMatch(m.text, e.text));
+            if (idx !== -1) {
+              const cand = base[idx];
+              const oldIdx = base.findIndex(m => m && String(m.id) === String(e.oldId));
+              if (oldIdx !== -1) {
+                // Merge onto existing original-id entry
+                const merged = { ...base[oldIdx], ...cand, id: e.oldId, edited: true } as any;
+                // Merge reactions if both present
+                try {
+                  const r1 = base[oldIdx]?.reactions || {};
+                  const r2 = cand?.reactions || {};
+                  const keys = new Set([...Object.keys(r1), ...Object.keys(r2)]);
+                  const rr: any = {};
+                  keys.forEach(k => {
+                    const a = new Set<string>(r1[k] || []);
+                    (r2[k] || []).forEach((u: string) => a.add(u));
+                    if (a.size) rr[k] = Array.from(a).sort();
+                  });
+                  merged.reactions = rr;
+                } catch {}
+                base[oldIdx] = merged;
+                base.splice(idx, 1);
+              } else {
+                // No original present: rewrite id to oldId so future updates match
+                base[idx] = { ...cand, id: e.oldId, edited: true } as any;
+              }
+            }
+          }
+          // Final unique-by-id to be safe
+          return uniqueById(base);
+        } catch {
+          return items || [];
+        }
+      };
+
       // GC history
       if (d.type === "gc_history" && Array.isArray(d.items)) {
+        const tk = d.gcid ? `gc:${d.gcid}` : 'gc:unknown';
+        const rec = reconcileOnLoad(d.items, tk);
         seen.current.clear();
-        d.items.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
-        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && String(x.id)).filter(Boolean));
+        rec.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
+        historyIdsRef.current = new Set((rec || []).map((x: any) => x && String(x.id)).filter(Boolean));
         forceScrollRef.current = true; // scroll to latest
-        return setMessages(d.items);
+        return setMessages(rec);
       }
 
       if (d.type === "gc_created" && typeof d.gcid === 'string') {
@@ -733,9 +761,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         const isGC = d.thread === 'gc' && typeof d.gcid === 'string';
         const isDM = d.thread === 'dm' && typeof d.peer === 'string';
         const isMain = !d.thread || d.thread === 'main';
-        if (isGC && activeGcRef.current !== d.gcid) return;
-        if (isDM && activeDmRef.current !== d.peer) return;
-        if (isMain && (activeDmRef.current !== null || !!activeGcRef.current)) return;
+        // Off-thread? cache to apply on next history load for that thread
+        const offThread = (isGC && activeGcRef.current !== d.gcid) || (isDM && activeDmRef.current !== d.peer) || (isMain && (activeDmRef.current !== null || !!activeGcRef.current));
+        if (offThread) {
+          try { pendingTextUpdatesRef.current[String(d.id)] = { text: d.text, edited: true }; } catch {}
+          return;
+        }
         setMessages(prev => uniqueById(prev.map(m => (String(m.id) === String(d.id) ? { ...m, text: d.text, edited: true } : m))));
         return;
       }
@@ -745,45 +776,17 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         const isGC = d.thread === 'gc' && typeof d.gcid === 'string';
         const isDM = d.thread === 'dm' && typeof d.peer === 'string';
         const isMain = !d.thread || d.thread === 'main';
-        if (isGC && activeGcRef.current !== d.gcid) return;
-        if (isDM && activeDmRef.current !== d.peer) return;
-        if (isMain && (activeDmRef.current !== null || !!activeGcRef.current)) return;
-        let author: string | null = null;
-        let title = '';
-        let body = '';
-        const isHidden = typeof document !== 'undefined' && document.hidden;
+        // Off-thread? cache to apply later on history load
+        const offThread = (isGC && activeGcRef.current !== d.gcid) || (isDM && activeDmRef.current !== d.peer) || (isMain && (activeDmRef.current !== null || !!activeGcRef.current));
+        if (offThread) {
+          try { if (d.reactions && typeof d.reactions === 'object') pendingReactionUpdatesRef.current[String(d.id)] = { reactions: d.reactions }; } catch {}
+          return;
+        }
         setMessages(prev => uniqueById(prev.map(m => {
           if (String(m.id) !== String(d.id)) return m;
-          const prevReacts = m.reactions || {};
           const nextReacts = d.reactions || {};
-          // find any newly added username
-          try {
-            for (const emo of Object.keys(nextReacts)) {
-              const before = new Set<string>(prevReacts[emo] || []);
-              for (const u of nextReacts[emo] || []) {
-                if (!before.has(u) && u !== me) {
-                  author = u;
-                  title = `${u} reacted${isGC ? ` in ${gcsRef.current.find(x=>x.id===d.gcid)?.name || 'Group'}` : isDM ? ` in DM` : ' (Main)'} `;
-                  body = `${emo} to your message`;
-                  break;
-                }
-              }
-              if (author) break;
-            }
-          } catch {}
           return { ...m, reactions: nextReacts };
-  })));
-        // Notify if someone reacted to my message and I'm not on that thread or tab is hidden
-        if (author) {
-          const amAuthor = (() => {
-            try { const msg = messages.find(x => String(x.id) === String(d.id)); return msg && msg.sender === me; } catch { return false; }
-          })();
-          if (amAuthor) {
-            const offThread = (isGC && activeGcRef.current !== d.gcid) || (isDM && activeDmRef.current !== d.peer) || (isMain && (activeDmRef.current !== null || !!activeGcRef.current));
-            if (offThread || isHidden) notify(title || 'New reaction', body || '');
-          }
-        }
-        return;
+        })));
       }
 
       // Flash ping: highlight a specific message id for me
@@ -807,18 +810,21 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
       // Histories
       if (d.type === "history" && Array.isArray(d.items)) {
+        const rec = reconcileOnLoad(d.items, 'main');
         seen.current.clear();
-        d.items.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
-        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && String(x.id)).filter(Boolean));
+        rec.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
+        historyIdsRef.current = new Set((rec || []).map((x: any) => x && String(x.id)).filter(Boolean));
         forceScrollRef.current = true; // scroll to latest after loading history
-        return setMessages(d.items);
+        return setMessages(rec);
       }
       if (d.type === "dm_history" && Array.isArray(d.items)) {
+        const tk = d.peer ? `dm:${d.peer}` : 'dm:unknown';
+        const rec = reconcileOnLoad(d.items, tk);
         seen.current.clear();
-        d.items.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
-        historyIdsRef.current = new Set((d.items || []).map((x: any) => x && String(x.id)).filter(Boolean));
+        rec.forEach((x: any) => x?.id && seen.current.add(String(x.id)));
+        historyIdsRef.current = new Set((rec || []).map((x: any) => x && String(x.id)).filter(Boolean));
         forceScrollRef.current = true; // scroll to latest after loading dm history
-        return setMessages(d.items);
+        return setMessages(rec);
       }
 
       // Throttled AI streaming updates — apply only for the active thread
@@ -2364,7 +2370,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {/* Desktop (xl+): tray anchored to bubble to prevent vertical drift from reaction rows */}
                             <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
                               <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
-                                <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                                 {mine && m.type === 'message' && (
                                   <button type="button" onClick={() => { beginEdit(m); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
                                 )}
@@ -2402,7 +2408,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                               <>
                                 <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
                                   <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
-                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                                     {mine && m.type === 'message' && (
                                       <button type="button" onClick={() => { beginEdit(m); setShowTrayFor(null); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
                                     )}
@@ -2500,7 +2506,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                               <>
                                 <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
                                   <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
-                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                                     <button type="button"
                                       onClick={(e) => {
                                         const keys = m.reactions ? Object.keys(m.reactions) : [];
@@ -2524,7 +2530,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                           {/* Desktop (xl+): side action tray on hover (DM media) */}
                           <div className="hidden xl:block absolute top-1 right-0 z-20">
                             <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
-                              <button onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3 w-3" /></button>
+                              <button onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3 w-3" /></button>
                               <button
                                 onClick={(e) => {
                                   const keys = m.reactions ? Object.keys(m.reactions) : [];
@@ -2544,7 +2550,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                           {/* Desktop (xl+): side action tray on hover (GC media) */}
                           <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
                             <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
-                              <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                              <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                               <button type="button"
                                 onClick={(e) => {
                                   const keys = m.reactions ? Object.keys(m.reactions) : [];
@@ -2735,7 +2741,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {/* Desktop (xl+): tray anchored to bubble (DM text) to prevent vertical drift */}
                             <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
                               <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
-                                <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                                 <button type="button"
                                   onClick={(e) => {
                                     const keys = m.reactions ? Object.keys(m.reactions) : [];
@@ -2774,7 +2780,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                                 <div className="fixed inset-0 z-20" onClick={() => setShowTrayFor(null)} />
                                 <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
                                   <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
-                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                                     <button type="button"
                                       onClick={(e) => {
                                         const keys = m.reactions ? Object.keys(m.reactions) : [];
@@ -2888,7 +2894,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                                 <div className="fixed inset-0 z-20" onClick={() => setShowTrayFor(null)} />
                                 <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
                                   <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
-                                    <button onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3 w-3" /></button>
+                                    <button onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3 w-3" /></button>
                                     <button
                                       onClick={(e) => {
                                         const keys = m.reactions ? Object.keys(m.reactions) : [];
@@ -3082,7 +3088,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {/* Desktop (xl+): tray anchored to bubble (Main text) */}
                             <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
                               <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
-                                <button onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                <button onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                                 {mine && m.type === 'message' && (
                                   <button onClick={() => { beginEdit(m); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
                                 )}
@@ -3121,7 +3127,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                                 <div className="fixed inset-0 z-20" onClick={() => setShowTrayFor(null)} />
                                 <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
                                   <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
-                                    <button onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    <button onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                                     {mine && m.type === 'message' && (
                                       <button onClick={() => { beginEdit(m); setShowTrayFor(null); }} title="Edit" className="p-1 rounded-full text-[#cfc7aa] hover:bg-white/10 transition"><Pencil className="h-3.5 w-3.5" /></button>
                                     )}
@@ -3235,7 +3241,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                                 <div className="fixed inset-0 z-20" onClick={() => setShowTrayFor(null)} />
                                 <div className={`absolute top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-0' : 'left-full ml-0'} z-30`}>
                                   <div className="msg-tray flex items-center gap-1 bg-black/70 border border-white/10 backdrop-blur-md shadow-lg px-2 py-1 rounded-2xl transition-all duration-150 ease-out">
-                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                                    <button type="button" onClick={() => { startReply(m); setShowTrayFor(null); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                                     <button type="button"
                                       onClick={(e) => {
                                         const keys = m.reactions ? Object.keys(m.reactions) : [];
@@ -3265,7 +3271,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                           {/* Desktop (xl+): side action tray on hover (Main media) */}
                           <div className={`hidden xl:block absolute z-30 top-1/2 -translate-y-1/2 ${alignRight ? 'right-full mr-2' : 'left-full ml-2'}`}>
                             <div className="msg-tray flex items-center gap-1 bg-black/80 border border-white/15 backdrop-blur-sm shadow-lg px-2 py-1 rounded-2xl opacity-0 pointer-events-none transition-all duration-200 ease-out group-hover/message:opacity-100 group-hover/message:pointer-events-auto">
-                              <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-black' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
+                              <button type="button" onClick={() => { startReply(m); }} title="Reply" className={`p-1 rounded-full ${mine ? 'text-white/90' : 'text-[#cfc7aa]'} hover:bg-white/10 transition`}><CornerDownLeft className="h-3.5 w-3.5" /></button>
                               <button type="button"
                                 onClick={(e) => {
                                   const keys = m.reactions ? Object.keys(m.reactions) : [];
@@ -3600,3 +3606,5 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
     </div>
   );
 }
+
+export default ChatInterface;
