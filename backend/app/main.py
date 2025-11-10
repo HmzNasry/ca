@@ -21,7 +21,34 @@ try:
 except Exception:
     pass
 
-os.system("/data/chatapp/backend/update_chatlink.sh")
+# Delay tunnel update to ensure network is ready
+import subprocess
+import time
+import socket
+
+def wait_for_network(timeout=30):
+    """Wait for network connectivity before proceeding"""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            # Try to resolve github.com
+            socket.getaddrinfo('github.com', 443, socket.AF_INET)
+            return True
+        except socket.gaierror:
+            time.sleep(1)
+    return False
+
+def update_tunnel_delayed():
+    """Update tunnel with network check and delay"""
+    time.sleep(10)  # Initial 10-second delay
+    if wait_for_network():
+        subprocess.Popen(["/data/chatapp/update_tunnel.sh"], 
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL)
+
+# Run tunnel update in background thread to not block startup
+import threading
+threading.Thread(target=update_tunnel_delayed, daemon=True).start()
 
 app = FastAPI()
 init_db()

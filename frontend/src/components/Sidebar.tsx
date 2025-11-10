@@ -90,7 +90,8 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
             const dmCount = unreadDm[u] || 0;
             const tagVal = (tags as any)[u];
             const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
-            const isDev = !!(tagObj && ((tagObj as any).special === 'dev' || (tagObj as any).color === 'rainbow'));
+            // DEV badge only for explicit special==='dev'; rainbow color alone should not imply DEV
+            const isDev = !!(tagObj && (tagObj as any).special === 'dev');
             // NEW: activity indicator
             const isActive = userActivity && userActivity[u];
             return (
@@ -116,6 +117,7 @@ export default function Sidebar({ users, me, activeDm, unreadDm, unreadMain, sid
                         const label = String((tagObj as any).text || "");
                         if (!label || label.toUpperCase() === 'DEV') return null; // base DEV badge is shown separately
                         const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                        if ((c || '').toLowerCase() === 'rainbow') return <span className={`dev-rainbow font-semibold`}> ({label})</span>;
                         if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
                         return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                       })()}

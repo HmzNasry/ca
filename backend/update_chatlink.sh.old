@@ -8,7 +8,7 @@ NC='\033[0m' # No Color
 echo -e "${YELLOW}Starting ChatLink updater...${NC}"
 
 # Change to chatlink directory
-cd ../chatlink || {
+cd /data/chatapp/chatlink || {
   echo -e "${RED}Error: chatlink directory not found${NC}"
   exit 1
 }

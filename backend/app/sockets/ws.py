@@ -83,6 +83,69 @@ manager.user_ips = {}  # username -> last known IP
 ai_enabled = True
 ai_tasks = {}  # ai_id -> {"task": asyncio.Task, "owner": str}
 
+# ---- History normalization helpers ----
+def _union_reactions(a: dict | None, b: dict | None) -> dict:
+    out: dict[str, list[str]] = {}
+    try:
+        if isinstance(a, dict):
+            for emo, users in a.items():
+                if isinstance(users, list):
+                    out[emo] = sorted(list(set(users)))
+        if isinstance(b, dict):
+            for emo, users in b.items():
+                cur = set(out.get(emo, []))
+                if isinstance(users, list):
+                    cur.update(u for u in users if isinstance(u, str))
+                out[emo] = sorted(list(cur))
+        # prune empties
+        for k in list(out.keys()):
+            if not out[k]:
+                out.pop(k, None)
+    except Exception:
+        pass
+    return out
+
+def _normalize_items(items: list[dict]) -> list[dict]:
+    """Collapse duplicate ids, merge reactions, and prefer latest non-empty text.
+    Preserve the position of the first occurrence for ordering.
+    """
+    out: list[dict] = []
+    index_by_id: dict[str, int] = {}
+    for it in (items or []):
+        try:
+            mid = str(it.get("id") or "")
+        except Exception:
+            mid = ""
+        if not mid:
+            out.append(it)
+            continue
+        if mid in index_by_id:
+            idx = index_by_id[mid]
+            base = out[idx]
+            merged = dict(base)
+            try:
+                # Prefer latest non-empty text; mark edited if text changed or edited flag present
+                t_old = base.get("text")
+                t_new = it.get("text")
+                if isinstance(t_new, str) and (t_new != "" and t_new != t_old):
+                    merged["text"] = t_new
+                    merged["edited"] = True
+                elif it.get("edited"):
+                    merged["edited"] = True
+                # Merge reactions (union users per emoji)
+                merged["reactions"] = _union_reactions(base.get("reactions"), it.get("reactions")) or merged.get("reactions")
+                # Prefer latest known values for dynamic fields when present
+                for k in ("counts", "votes", "total_possible", "spotify_preview_html", "youtube_preview_html"):
+                    if it.get(k) is not None:
+                        merged[k] = it.get(k)
+            except Exception:
+                pass
+            out[idx] = merged
+        else:
+            index_by_id[mid] = len(out)
+            out.append(it)
+    return out
+
 async def _cancel_all_ai():
     for ai_id, meta in list(ai_tasks.items()):
         task: asyncio.Task = meta.get("task")
@@ -248,21 +311,31 @@ async def ws_handler(ws: WebSocket, token: str):
 
             # --- History for Main ---
             if data.get("type") == "history_request":
-                await ws.send_text(json.dumps({"type": "history", "items": manager.history}))
+                try:
+                    items = _normalize_items(list(manager.history))
+                except Exception:
+                    items = list(manager.history)
+                await ws.send_text(json.dumps({"type": "history", "items": items}))
                 continue
 
             # --- DM: history request ---
             if data.get("type") == "dm_history" and isinstance(data.get("peer"), str):
                 peer = data.get("peer").strip()
                 if peer and peer != sub:
-                    items = manager.get_dm_history(sub, peer)
+                    try:
+                        items = _normalize_items(manager.get_dm_history(sub, peer))
+                    except Exception:
+                        items = manager.get_dm_history(sub, peer)
                     await ws.send_text(json.dumps({"type": "dm_history", "peer": peer, "items": items}))
                 continue
             # --- GC: history request ---
             if data.get("type") == "gc_history" and isinstance(data.get("gcid"), str):
                 gid = data.get("gcid").strip()
                 if gid and manager.user_in_gc(gid, sub):
-                    items = manager.get_gc_history(gid)
+                    try:
+                        items = _normalize_items(manager.get_gc_history(gid))
+                    except Exception:
+                        items = manager.get_gc_history(gid)
                     await ws.send_text(json.dumps({"type": "gc_history", "gcid": gid, "items": items}))
                 continue
             if data.get("thread") == "dm" and isinstance(data.get("peer"), str):

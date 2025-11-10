@@ -72,7 +72,8 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
   const tagObj = typeof tagVal === 'string' ? { text: tagVal, color: 'white' } : (tagVal || null);
 
   return (
-    <div className={`flex ${alignRight ? "justify-end" : "justify-start"} ${first ? "mt-3" : ""} mb-2`}>
+    // Full-width row so hovering anywhere across the horizontal line triggers actions.
+  <div className={`relative w-full flex group/message ${alignRight ? "justify-end" : "justify-start"} ${first ? "mt-3" : ""} mb-2`}>
       <div
         ref={(el) => {
           animateIn(el);
@@ -83,7 +84,8 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
         }}
         onMouseEnter={() => onStopFlashing(m.id)}
         onClick={() => onStopFlashing(m.id)}
-        className={`relative max-w-[80%] inline-flex flex-col group ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""}`}
+        // Bubble with expanded invisible hover target using pseudo-element.
+  className={`relative max-w-[80%] inline-flex flex-col ${alignRight ? "items-end" : "items-start"} ${shouldFlash ? "border-2 rounded-2xl" : ""} before:absolute before:inset-0 before:-inset-x-4 before:-inset-y-1 before:rounded-2xl before:pointer-events-none`}
         style={shouldFlash ? { animation: "flash-red 1.6s ease-in-out infinite", borderColor: "rgba(239,68,68,0.85)", padding: "0.16rem" } : undefined}
       >
         {first && (
@@ -95,7 +97,8 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
                   {(() => {
                     const tv = (tagsMap as any)[m.sender];
                     const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null);
-                    const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV'));
+                    // Only explicit special==='dev' yields DEV badge
+                    const isDevSender = !!(tobj && (tobj as any).special === 'dev');
                     return (
                       <>
                         {isDevSender && <span className="dev-rainbow font-semibold"> (DEV)</span>}
@@ -108,6 +111,7 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
                     const label = String((tagObj as any).text || "");
                     if (!label || label.toUpperCase() === 'DEV') return null;
                     const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                    if ((c || '').toLowerCase() === 'rainbow') return <span className={`dev-rainbow font-semibold`}> ({label})</span>;
                     if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
                     return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                   })()}

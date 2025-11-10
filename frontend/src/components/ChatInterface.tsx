@@ -112,6 +112,32 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   // Track recent edits to reconcile servers that re-emit edits as new messages
   const recentEditsRef = useRef<Array<{ oldId: string; sender: string; text: string; threadKey: string; time: number }>>([]);
 
+  // Re-added foundational refs required for thread context, scrolling, and socket interaction.
+  const ws = useRef<WebSocket | null>(null);
+  const txtRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const activeDmRef = useRef<string | null>(null);
+  const activeGcRef = useRef<string | null>(null);
+  const seen = useRef<Set<string>>(new Set());
+
+  // Time formatter (24h HH:MM) used in message headers
+  const fmtTime = useCallback((iso?: string) => {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      const h = d.getHours().toString().padStart(2, '0');
+      const m = d.getMinutes().toString().padStart(2, '0');
+      return `${h}:${m}`;
+    } catch { return ""; }
+  }, []);
+
+  // Reaction picker close helper
+  const closeReactionPicker = useCallback(() => {
+    setReactionPickerFor(null);
+    setReactionPickerPos(null);
+  }, []);
+
   // Normalize text for robust edit reconciliation (collapse whitespace, trim)
   const normText = (s?: string) => {
     if (typeof s !== 'string') return '';
@@ -192,6 +218,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   };
 
   useEffect(() => { activeGcRef.current = activeGc; }, [activeGc]);
+  useEffect(() => { activeDmRef.current = activeDm; }, [activeDm]);
   // Track ids received from initial history to avoid flashing old mentions
   const historyIdsRef = useRef<Set<string>>(new Set());
   // timers for typing indicator
@@ -2315,15 +2342,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
                       {/* AI spinner when text is empty (match DM/Main) */}
                       {m.type === "message" && m.sender === "AI" && !(m.text && m.text.trim()) && (
-                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[50vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[70vw] sm:max-w-[80ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                            <span className="inline-flex items-center gap-2 text-[#cfc7aa]">
                              Generating Response <Loader2 className="h-4 w-4 animate-spin" />
                            </span>
                          </div>
                        )}
                       {m.type === "message" && !(showUrlImg || showUrlVid) && !(m.sender === "AI" && !(m.text && m.text.trim())) && (
-                        <div className="relative inline-block max-w-[50vw] sm:max-w-[70ch] pt-2 -mt-2">
-                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className="relative inline-block max-w-[70vw] sm:max-w-[80ch] pt-2 -mt-2">
+                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-visible ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                             {m.reply_to && (
                               <div className="mb-2 flex items-center gap-2">
                                 <button
@@ -2463,11 +2490,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       )}
 
                       {m.type === "message" && (showUrlImg || showUrlVid) && (
-                        <div className="relative">
+                        <div className="relative inline-block">
                           {showUrlImg ? (
-                            <img src={firstUrl!} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={firstUrl!} className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : (
-                            <video src={firstUrl!} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={firstUrl!} controls className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           )}
                           {canDelete && (
                             <button onClick={() => deleteMsg(m.id)} title="Delete" className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 hover:opacity-100 focus:opacity-100 transition p-1 rounded-full bg-black text-red-500 shadow-md z-30 ring-1 ring-white/15 pointer-events-auto">
@@ -2481,11 +2508,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {m.type === "media" && (
                         <div className="relative inline-block">
                           {isImage ? (
-                            <img src={full(m.url)} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={full(m.url)} className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : isVideo ? (
-                            <video src={full(m.url)} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={full(m.url)} controls className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : isAudio ? (
-                            <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
+                            <audio src={full(m.url)} controls className="w-[85vw] max-w-[80ch]" />
                           ) : (
                             <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
                           )}
@@ -2686,15 +2713,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
                       {/* AI spinner when text is empty */}
                       {m.type === "message" && m.sender === "AI" && !(m.text && m.text.trim()) && (
-                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[50vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[70vw] sm:max-w-[80ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                            <span className="inline-flex items-center gap-2 text-[#cfc7aa]">
                              Generating Response <Loader2 className="h-4 w-4 animate-spin" />
                            </span>
                          </div>
                        )}
                       {m.type === "message" && !(showUrlImg || showUrlVid) && !(m.sender === "AI" && !(m.text && m.text.trim())) && (
-                        <div className="relative inline-block max-w-[50vw] sm:max-w-[70ch] pt-2 -mt-2">
-                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className="relative inline-block max-w-[70vw] sm:max-w-[80ch] pt-2 -mt-2">
+                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-visible ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                             {m.reply_to && (
                               <div className="mb-2 flex items-center gap-2">
                                 <button
@@ -2846,11 +2873,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
                       {/* URL preview bubble for pure links */}
                       {m.type === "message" && (showUrlImg || showUrlVid) && (
-                        <div className="relative">
+                        <div className="relative inline-block">
                           {showUrlImg ? (
-                            <img src={firstUrl!} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={firstUrl!} className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : (
-                            <video src={firstUrl!} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={firstUrl!} controls className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           )}
                           {canDelete && (
                             <button
@@ -2868,11 +2895,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {m.type === "media" && (
                         <div className="relative inline-block">
                           {isImage ? (
-                            <img src={full(m.url)} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={full(m.url)} className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : isVideo ? (
-                            <video src={full(m.url)} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={full(m.url)} controls className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : isAudio ? (
-                            <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
+                            <audio src={full(m.url)} controls className="w-[85vw] max-w-[80ch]" />
                           ) : (
                             <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
                           )}
@@ -3033,15 +3060,15 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
                       {/* AI spinner when text is empty */}
                       {m.type === "message" && m.sender === "AI" && !(m.text && m.text.trim()) && (
-                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[50vw] sm:max-w-[70ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className={`relative inline-block rounded-2xl px-4 py-3 break-words whitespace-pre-wrap max-w-[70vw] sm:max-w-[80ch] ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                            <span className="inline-flex items-center gap-2 text-[#cfc7aa]">
                              Generating Response <Loader2 className="h-4 w-4 animate-spin" />
                            </span>
                          </div>
                        )}
                       {m.type === "message" && !(showUrlImg || showUrlVid) && !(m.sender === "AI" && !(m.text && m.text.trim())) && (
-                        <div className="relative inline-block max-w-[50vw] sm:max-w-[70ch] pt-2 -mt-2">
-                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-hidden ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+                        <div className="relative inline-block max-w-[70vw] sm:max-w-[80ch] pt-2 -mt-2">
+                          <div className={`relative rounded-2xl px-4 sm:pt-3 pt-6 pb-3 break-words whitespace-pre-wrap overflow-visible ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"}`} style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
                             {m.reply_to && (
                               <div className="mb-2 flex items-center gap-2">
                                 <button
@@ -3193,11 +3220,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
                       {/* URL preview bubble for pure links */}
                       {m.type === "message" && (showUrlImg || showUrlVid) && (
-                        <div className="relative">
+                        <div className="relative inline-block">
                           {showUrlImg ? (
-                            <img src={firstUrl!} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={firstUrl!} className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : (
-                            <video src={firstUrl!} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={firstUrl!} controls className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           )}
                           {canDelete && (
                             <button
@@ -3215,11 +3242,11 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                       {m.type === "media" && (
                         <div className="relative inline-block">
                           {isImage ? (
-                            <img src={full(m.url)} className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <img src={full(m.url)} className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : isVideo ? (
-                            <video src={full(m.url)} controls className="max-w-[50vw] sm:max-w-[60ch] rounded-xl" />
+                            <video src={full(m.url)} controls className="max-w-[70vw] sm:max-w-[80ch] rounded-xl" />
                           ) : isAudio ? (
-                            <audio src={full(m.url)} controls className="w-[75vw] max-w-[60ch]" />
+                            <audio src={full(m.url)} controls className="w-[85vw] max-w-[80ch]" />
                           ) : (
                             <a href={full(m.url)} target="_blank" className={`block rounded-2xl px-4 py-3 ${mine ? "bg-[#e7dec3]/90 text-[#1c1c1c]" : "bg-[#2b2b2b]/70 text-[#f7f3e8]"} underline`}>Download file ({m.mime || "file"})</a>
                           )}

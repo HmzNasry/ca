@@ -45,7 +45,7 @@ def _is_effective_admin(user: str) -> bool:
     try:
         # Treat DEV (localhost) as superior admin for moderation protections
         tag = manager.tags.get(user) or {}
-        is_dev = isinstance(tag, dict) and (tag.get("special") == "dev" or tag.get("color") == "rainbow" or str(tag.get("text", "")).upper() == "DEV")
+        is_dev = isinstance(tag, dict) and tag.get("special") == "dev"
         return is_dev or (manager.roles.get(user) == "admin") or (user in manager.promoted_admins)
     except Exception:
         return False
@@ -53,7 +53,7 @@ def _is_effective_admin(user: str) -> bool:
 def _is_dev(user: str) -> bool:
     try:
         tag = manager.tags.get(user) or {}
-        return isinstance(tag, dict) and (tag.get("special") == "dev" or tag.get("color") == "rainbow" or str(tag.get("text", "")).upper() == "DEV")
+        return isinstance(tag, dict) and tag.get("special") == "dev"
     except Exception:
         return False
 

@@ -35,11 +35,7 @@ def is_effective_admin(manager: ConnMgr, user: str) -> bool:
     """
     try:
         tag = manager.tags.get(user) or {}
-        is_dev = isinstance(tag, dict) and (
-            tag.get("special") == "dev"
-            or tag.get("color") == "rainbow"
-            or str(tag.get("text", "")).upper() == "DEV"
-        )
+        is_dev = isinstance(tag, dict) and tag.get("special") == "dev"
         if is_dev:
             return True
         if user in manager.promoted_admins:
@@ -52,11 +48,7 @@ def is_effective_admin(manager: ConnMgr, user: str) -> bool:
 def is_dev(manager: ConnMgr, user: str) -> bool:
     try:
         tag = manager.tags.get(user) or {}
-        return isinstance(tag, dict) and (
-            tag.get("special") == "dev"
-            or tag.get("color") == "rainbow"
-            or str(tag.get("text", "")).upper() == "DEV"
-        )
+        return isinstance(tag, dict) and tag.get("special") == "dev"
     except Exception:
         return False
 
