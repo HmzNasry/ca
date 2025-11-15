@@ -21,35 +21,6 @@ try:
 except Exception:
     pass
 
-# Delay tunnel update to ensure network is ready
-import subprocess
-import time
-import socket
-
-def wait_for_network(timeout=30):
-    """Wait for network connectivity before proceeding"""
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            # Try to resolve github.com
-            socket.getaddrinfo('github.com', 443, socket.AF_INET)
-            return True
-        except socket.gaierror:
-            time.sleep(1)
-    return False
-
-def update_tunnel_delayed():
-    """Update tunnel with network check and delay"""
-    time.sleep(10)  # Initial 10-second delay
-    if wait_for_network():
-        subprocess.Popen(["/data/chatapp/update_tunnel.sh"], 
-                        stdout=subprocess.DEVNULL, 
-                        stderr=subprocess.DEVNULL)
-
-# Run tunnel update in background thread to not block startup
-import threading
-threading.Thread(target=update_tunnel_delayed, daemon=True).start()
-
 app = FastAPI()
 init_db()
 app.add_middleware(
@@ -339,7 +310,7 @@ except Exception:
 try:
     import os
     from fastapi.staticfiles import StaticFiles
-    FRONTEND_DIR = os.environ.get("CHATAPP_FRONTEND_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+    FRONTEND_DIR = os.environ.get("CA_FRONTEND_DIR") or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
     if os.path.isdir(FRONTEND_DIR):
         app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="spa")
 except Exception:

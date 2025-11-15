@@ -3,18 +3,33 @@
 
 echo "[$(date)] Starting tunnel URL update..."
 
+# Wait longer for cloudflared to fully initialize and stabilize
+sleep 10
+
 # Wait for tunnel to be ready and extract URL
 TUNNEL_URL=""
-for i in {1..30}; do
-    # Get tunnel URL from systemd journal
-    TUNNEL_URL=$(sudo journalctl -u chatapp-tunnel.service -n 50 --no-pager | grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' | tail -1)
+PREV_URL=""
+STABLE_COUNT=0
+for i in {1..40}; do
+    # Get tunnel URL from systemd journal - look for the "INF |" format which is the final URL
+    TUNNEL_URL=$(sudo journalctl -u ca-tunnel.service -n 100 --no-pager | grep 'INF |' | grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' | tail -1)
     
     if [ ! -z "$TUNNEL_URL" ]; then
-        echo "[$(date)] Found tunnel URL: $TUNNEL_URL"
-        break
+        # Wait to see if URL changes (cloudflared sometimes outputs multiple URLs)
+        if [ "$TUNNEL_URL" == "$PREV_URL" ]; then
+            STABLE_COUNT=$((STABLE_COUNT + 1))
+            if [ $STABLE_COUNT -ge 3 ]; then
+                echo "[$(date)] Found stable tunnel URL after $STABLE_COUNT checks: $TUNNEL_URL"
+                break
+            fi
+        else
+            STABLE_COUNT=0
+        fi
+        PREV_URL="$TUNNEL_URL"
+        echo "[$(date)] Found tunnel URL (checking stability $STABLE_COUNT/3): $TUNNEL_URL"
     fi
     
-    echo "[$(date)] Waiting for tunnel URL... (attempt $i/30)"
+    echo "[$(date)] Waiting for tunnel URL... (attempt $i/40)"
     sleep 2
 done
 
@@ -24,12 +39,11 @@ if [ -z "$TUNNEL_URL" ]; then
 fi
 
 # Update the HTML file
-cd /data/chatapp/chatlink || exit 1
+cd /data/ca/calink || exit 1
 
 export GIT_SSH_COMMAND="ssh -i /home/hzr/.ssh/id_rsa -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
-eval $(ssh-agent -s) > /dev/null 2>&1
-ssh-add /home/hzr/.ssh/id_rsa > /dev/null 2>&1
-git config --add safe.directory /data/chatapp/chatlink
+
+git config --add safe.directory /data/ca/calink
 
 # Fetch and reset to remote
 git fetch origin master || exit 1

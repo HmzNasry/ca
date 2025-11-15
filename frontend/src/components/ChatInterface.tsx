@@ -187,11 +187,12 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       window.removeEventListener('keydown', onKey);
     };
   }, [showTrayFor]);
-  // Helper: ensure messages list has unique ids (keep first occurrence)
+  // Helper: ensure messages list has unique ids (keep last occurrence)
   const uniqueById = useCallback((arr: any[]) => {
     const seenIds = new Set<string>();
     const out: any[] = [];
-    for (const it of arr) {
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const it = arr[i];
       try {
         const sid = it && it.id != null ? String(it.id) : '';
         if (sid) {
@@ -201,7 +202,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       } catch {}
       out.push(it);
     }
-    return out;
+    return out.reverse();
   }, []);
 
   const openReactionPicker = (e: React.MouseEvent, mid: string) => {
@@ -276,10 +277,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   }, []);
 
   const isAdmin = admins.includes(me) || role === "admin";
-  // DEV (localhost) is superior: detect my DEV tag and treat as admin-equivalent on client
+  // DEV detection: only explicit special==='dev' confers DEV powers; rainbow color or 'DEV' text alone do not
   const myTagVal = (tagsMap as any)[me];
   const myTagObj = typeof myTagVal === 'string' ? { text: myTagVal, color: 'white' } : (myTagVal || null);
-  const isDevMe = !!(myTagObj && ((myTagObj as any).special === 'dev' || (myTagObj as any).color === 'rainbow' || String((myTagObj as any).text || '').toUpperCase() === 'DEV'));
+  const isDevMe = !!(myTagObj && (myTagObj as any).special === 'dev');
   const isAdminEffective = isAdmin || isDevMe;
   const full = (url: string) => (url.startsWith("/") ? location.origin + url : url);
 
@@ -626,7 +627,24 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
               out.push({ ...it });
             }
           }
-          const base = [...out, ...Array.from(byId.values())];
+          let base = [...out, ...Array.from(byId.values())];
+
+          // Apply any pending off-thread updates that were cached for this thread
+          try {
+            const applyIds = Object.keys(pendingTextUpdatesRef.current || {});
+            if (applyIds.length) {
+              base = base.map(m => {
+                const sid = m && m.id != null ? String(m.id) : '';
+                if (!sid) return m;
+                const upd = (pendingTextUpdatesRef.current as any)[sid];
+                if (!upd) return m;
+                return { ...m, text: upd.text ?? m.text, edited: upd.edited ?? m.edited };
+              });
+              // Clear only entries that have been applied
+              applyIds.forEach(id => { try { delete (pendingTextUpdatesRef.current as any)[id]; } catch {} });
+            }
+          } catch {}
+
           // Second pass: apply recent edit mapping in this thread, preferring edited=true content
           const edits = (recentEditsRef.current || []).filter(e => e.threadKey === tk && (Date.now() - e.time) < 30000);
           for (const e of edits) {
@@ -659,8 +677,57 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
               }
             }
           }
-          // Final unique-by-id to be safe
-          return uniqueById(base);
+
+          // Third pass: collapse duplicate-looking entries by sender + normalized text
+          const bySig = new Map<string, any>();
+          const mergeReacts = (a?: any, b?: any) => {
+            try {
+              const r1 = (a && a.reactions) || {};
+              const r2 = (b && b.reactions) || {};
+              const keys = new Set([...Object.keys(r1), ...Object.keys(r2)]);
+              const rr: any = {};
+              keys.forEach(k => {
+                const s = new Set<string>(r1[k] || []);
+                (r2[k] || []).forEach((u: string) => s.add(u));
+                if (s.size) rr[k] = Array.from(s).sort();
+              });
+              return rr;
+            } catch { return (a && a.reactions) || (b && b.reactions) || {}; }
+          };
+          for (const it of base) {
+            const kind = it?.type;
+            const sender = it?.sender;
+            const txt = typeof it?.text === 'string' ? it.text : '';
+            if (kind !== 'message' || !sender || !txt) {
+              // keep non-text messages as-is
+              const key = `__nonmsg__${Math.random()}`;
+              bySig.set(key, it);
+              continue;
+            }
+            const sig = `${String(sender)}::${normText(txt)}::${it.timestamp || ''}`;
+            const prev = bySig.get(sig);
+            if (!prev) {
+              bySig.set(sig, it);
+            } else {
+              const aEdited = !!prev.edited;
+              const bEdited = !!it.edited;
+              const aTs = Date.parse(prev.timestamp || '') || 0;
+              const bTs = Date.parse(it.timestamp || '') || 0;
+              const close = Math.abs(aTs - bTs) < 2 * 60 * 1000; // 2 minutes window
+              if (aEdited && !bEdited && close) {
+                bySig.set(sig, { ...prev, reactions: mergeReacts(prev, it) });
+              } else if (!aEdited && bEdited && close) {
+                bySig.set(sig, { ...it, reactions: mergeReacts(prev, it) });
+              } else if (bTs && (!aTs || bTs >= aTs)) {
+                bySig.set(sig, { ...it, reactions: mergeReacts(prev, it) });
+              } else {
+                bySig.set(sig, { ...prev, reactions: mergeReacts(prev, it) });
+              }
+            }
+          }
+          const collapsed = Array.from(bySig.values());
+
+          return uniqueById(collapsed);
         } catch {
           return items || [];
         }
@@ -776,7 +843,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
             setMessages(prev => prev.filter(m => String(m.id) !== String(d.id)));
           }
         } else {
-          if (activeDmRef.current === null) {
+          if (activeDmRef.current === null && !activeGcRef.current) {
             setMessages(prev => prev.filter(m => String(m.id) !== String(d.id)));
           }
         }
@@ -814,6 +881,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
           const nextReacts = d.reactions || {};
           return { ...m, reactions: nextReacts };
         })));
+        return;
       }
 
       // Flash ping: highlight a specific message id for me
@@ -1612,6 +1680,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   };
 
   const deleteMsg = (id: string) => {
+    setMessages(prev => prev.filter(m => String(m.id) !== String(id)));
     const threadPayload = activeGcRef.current
       ? { thread: 'gc', gcid: activeGcRef.current }
       : (activeDmRef.current
@@ -1641,7 +1710,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       return;
     }
     // Optimistic UI: toggle my reaction locally for snappy UX
-    setMessages(prev => prev.map(m => {
+    setMessages(prev => uniqueById(prev.map(m => {
       if (m.id !== id) return m;
       const map = (m.reactions && typeof m.reactions === 'object') ? { ...m.reactions } : {} as Record<string, string[]>;
       const arr = new Set<string>(Array.isArray(map[emoji]) ? map[emoji] : []);
@@ -1650,7 +1719,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
       // prune empty emoji buckets
       Object.keys(map).forEach(k => { if (!map[k] || map[k].length === 0) delete map[k]; });
       return { ...m, reactions: map };
-    }));
+    })));
     const payload = activeGcRef.current ? { thread: 'gc', gcid: activeGcRef.current } : (activeDmRef.current ? { thread: 'dm', peer: activeDmRef.current } : { thread: 'main' } as any);
     try { ws.current?.send(JSON.stringify({ type: 'react_message', id, emoji, ...payload })); } catch {}
   };
@@ -2319,7 +2388,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && (tobj as any).special === 'dev'); return (
                                   <>
                                     {isDevSender && <span className="dev-rainbow font-semibold"> (DEV)</span>}
                                     {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
@@ -2330,6 +2399,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                                   const label = String((tagObj as any).text || "");
                                   if (!label || label.toUpperCase() === 'DEV') return null;
                                   const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                                  if ((c || '').toLowerCase() === 'rainbow') return <span className="dev-rainbow font-semibold"> ({label})</span>;
                                   if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
                                   return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                                 })()}
@@ -2690,7 +2760,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && (tobj as any).special === 'dev'); return (
                                   <>
                                     {isDevSender && <span className="dev-rainbow font-semibold"> (DEV)</span>}
                                     {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
@@ -2701,6 +2771,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                                   const label = String((tagObj as any).text || "");
                                   if (!label || label.toUpperCase() === 'DEV') return null;
                                   const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                                  if ((c || '').toLowerCase() === 'rainbow') return <span className="dev-rainbow font-semibold"> ({label})</span>;
                                   if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
                                   return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                                 })()}
@@ -3037,7 +3108,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                             {m.sender === "AI" && m.model ? `AI (${m.model})` : (
                               <>
                                 {m.sender}
-                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && ((tobj as any).special === 'dev' || (tobj as any).color === 'rainbow' || String((tobj as any).text || '').toUpperCase() === 'DEV')); return (
+                                {(() => { const tv = (tagsMap as any)[m.sender]; const tobj = typeof tv === 'string' ? { text: tv, color: 'white' } : (tv || null); const isDevSender = !!(tobj && (tobj as any).special === 'dev'); return (
                                   <>
                                     {isDevSender && <span className="dev-rainbow font-semibold"> (DEV)</span>}
                                     {admins.includes(m.sender) && <span className="text-red-500 font-semibold"> (ADMIN)</span>}
@@ -3048,6 +3119,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
                                   const label = String((tagObj as any).text || "");
                                   if (!label || label.toUpperCase() === 'DEV') return null;
                                   const isHex = !!(c && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c));
+                                  if ((c || '').toLowerCase() === 'rainbow') return <span className="dev-rainbow font-semibold"> ({label})</span>;
                                   if (isHex) return <span className={`font-semibold`} style={{ color: c! }}> ({label})</span>;
                                   return <span className={`${colorClass(c)} font-semibold`}> ({label})</span>;
                                 })()}

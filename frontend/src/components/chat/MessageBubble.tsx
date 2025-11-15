@@ -42,7 +42,7 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
   const isAuthorDev = (() => {
     const tag = tagsMap[author];
     if (!tag) return false;
-    return tag.special === 'dev' || tag.color === 'rainbow' || String(tag.text || '').toUpperCase() === 'DEV';
+    return tag.special === 'dev'; // Only explicit special==='dev' counts as DEV
   })();
   const isAuthorAdmin = admins.includes(author) && !isAuthorDev;
 
@@ -97,7 +97,7 @@ export default function MessageBubble({ m, i, messages, me, admins, tagsMap, isA
                   {(() => {
                     const tv = (tagsMap as any)[m.sender];
                     const tobj = typeof tv === 'string' ? { text: tv, color: 'orange' } : (tv || null);
-                    // Only explicit special==='dev' yields DEV badge
+                    // Only explicit special==='dev' yields DEV badge (rainbow color or 'DEV' text alone ignored)
                     const isDevSender = !!(tobj && (tobj as any).special === 'dev');
                     return (
                       <>

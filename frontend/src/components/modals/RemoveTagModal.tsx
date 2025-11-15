@@ -21,7 +21,7 @@ export default function RemoveTagModal({ open, me, users, admins = [], tagsMap, 
     const tag = (tagsMap as any)[u];
     if (!tag) return false;
     const obj = typeof tag === 'string' ? { text: tag, color: 'white' } : tag;
-    return obj?.special === 'dev' || obj?.color === 'rainbow' || String(obj?.text || '').toUpperCase() === 'DEV';
+    return obj?.special === 'dev';
   };
 
   const locked = new Set(tagLocks || []);
