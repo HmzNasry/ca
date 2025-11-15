@@ -62,10 +62,11 @@
         "2001:56a:7444:c000:40e8:2d8c:d2fe:9699",
         "2001:56a:7444:c000:684a:e601:387b:cf29",
         "2001:56a:7444:c000:516c:f3bf:6fed:acf9",
-        "2001:56a:7444:c000:ad73:69c:5d60:ae18"
+        "2001:56a:7444:c000:ad73:69c:5d60:ae18",
+        "2001:56a:7444:c000:84b9:d6c3:8af5:ff8d"
       ],
       "tag": {
-        "text": "why am i like this rn :/",
+        "text": "exxy's husband",
         "color": "#99000f"
       }
     },
@@ -126,11 +127,7 @@
         "2601:204:f47e:20a0:a5ae:21c4:df15:77e9",
         "2601:204:f47e:20a0:307f:a8d8:8fed:1472",
         "2601:204:f47e:20a0:8737:ae9e:9216:257d"
-      ],
-      "tag": {
-        "text": "aid is awesome",
-        "color": "#ffffff"
-      }
+      ]
     },
     "9d4a4ed5517246e59b493a0c5b8f8129": {
       "username": "\ud835\udce3\ud835\udcea\ud835\udd02\ud835\udce3\ud835\udcea\ud835\udd02\ud83e\udddf\u200d\u2640",
@@ -173,8 +170,8 @@
         "74.36.203.173"
       ],
       "tag": {
-        "text": "Ich liebe aliyah",
-        "color": "#812c2c"
+        "text": "Street fighter is peak",
+        "color": "#ffffff"
       }
     },
     "2ddcf0eb68f9424a8b17386674e86de6": {
@@ -285,7 +282,8 @@
         "2603:7000:b702:4de5:3c65:498f:a38e:612e",
         "2603:7000:b702:4de5:f048:b1f7:a582:3b2b",
         "2603:7000:b702:4de5:8195:2730:ba6c:1c71",
-        "2603:7000:b702:4de5:fd9:e5d6:6649:d0ca"
+        "2603:7000:b702:4de5:fd9:e5d6:6649:d0ca",
+        "2603:7000:b702:4de5:352d:a98e:3b8:3470"
       ]
     },
     "1f364b84acf04e5b928b50e0eeeecf14": {
@@ -386,8 +384,8 @@
       "username": "<3 exxy!!!!!!!!!!! ^^",
       "ips": [],
       "tag": {
-        "text": "LAK IS MY POOKSSSSSS <333333",
-        "color": "#f99595"
+        "text": "waiting for lak !! | half sick so i may be a grumps (TT o TT",
+        "color": "#ffc2df"
       }
     },
     "5049c69bdeed4082a108690dbed49c06": {
@@ -514,6 +512,27 @@
       "ips": [
         "75.51.50.103"
       ]
+    },
+    "608b54c1ed384fa8b89179b6377f7c41": {
+      "username": "clover",
+      "ips": [
+        "108.173.166.109"
+      ]
+    },
+    "2438031c83ed4920b9fe3780440654f6": {
+      "username": "Clover",
+      "ips": [],
+      "tag": {
+        "text": "Exploring the Underground",
+        "color": "#ffff00"
+      },
+      "tag_locked": true
+    },
+    "fd6363817baa4f4a86c14a6bbe4bba11": {
+      "username": "ExxyYYY",
+      "ips": [
+        "52.124.96.225"
+      ]
     }
   },
   "ip_to_uid": {
@@ -536,7 +555,7 @@
     "98.41.22.5": "5a081d3e4b754c0b822052c4a81256e1",
     "2603:800c:401:af76:6b9a:4646:964c:8a63": "9d4a4ed5517246e59b493a0c5b8f8129",
     "2607:fb91:1d44:8199:ad3:f57:6937:46f1": "5a081d3e4b754c0b822052c4a81256e1",
-    "52.124.96.225": "300500c81e2249d4b70a6e03eea317aa",
+    "52.124.96.225": "fd6363817baa4f4a86c14a6bbe4bba11",
     "2603:800c:500:c09f:74e8:5394:2825:bada": "a3410240bf2f475da5762aad5d59f7c3",
     "2601:204:f47e:20a0:8e1a:e5ce:d061:3cf6": "5a081d3e4b754c0b822052c4a81256e1",
     "2401:4900:1c66:a0f8:f45d:88b8:3fb5:e48c": "9cd6d745efb64b0b8a3dab2f91e7d589",
@@ -656,6 +675,9 @@
     "2001:56a:7444:c000:684a:e601:387b:cf29": "e10d2e9a3e924ce885b6172f9c562c5a",
     "2001:56a:7444:c000:516c:f3bf:6fed:acf9": "e10d2e9a3e924ce885b6172f9c562c5a",
     "2001:56a:7444:c000:ad73:69c:5d60:ae18": "e10d2e9a3e924ce885b6172f9c562c5a",
-    "2603:7000:b702:4de5:fd9:e5d6:6649:d0ca": "590d5538a1f0413593a406d1de57bedc"
+    "2603:7000:b702:4de5:fd9:e5d6:6649:d0ca": "590d5538a1f0413593a406d1de57bedc",
+    "2603:7000:b702:4de5:352d:a98e:3b8:3470": "590d5538a1f0413593a406d1de57bedc",
+    "108.173.166.109": "608b54c1ed384fa8b89179b6377f7c41",
+    "2001:56a:7444:c000:84b9:d6c3:8af5:ff8d": "e10d2e9a3e924ce885b6172f9c562c5a"
   }
 }

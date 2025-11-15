@@ -6,7 +6,7 @@
       "display_name": "lak",
       "pass_hash": "$2b$12$3B4okc290GT06x5A5jG6DO1x5fNLFGumEKY90sBsKcrGhwI5ossUy",
       "created_at": "2025-11-06T00:19:23.754615Z",
-      "last_seen_ip": "2001:56a:7444:c000:ad73:69c:5d60:ae18"
+      "last_seen_ip": "2001:56a:7444:c000:84b9:d6c3:8af5:ff8d"
     },
     "jayda": {
       "id": "1ff29cea5a2941cc9217f6007d1c7be9",
@@ -230,7 +230,7 @@
       "display_name": "\u1c14 \u22b9\u02da\u208a\u02da\ud835\udcd5\ud835\udcf5\ud835\udcf8\ud835\udd00\ud835\udd02\u02da\u208a\u02da\u22b9 \u1c14",
       "pass_hash": "$2b$12$SyMqYpjOnXoDZtcav3/aKewETSB.GtUOgHIcbVPNXkmjDbKb6QD9y",
       "created_at": "2025-11-11T15:58:44.463098Z",
-      "last_seen_ip": "2603:7000:b702:4de5:fd9:e5d6:6649:d0ca"
+      "last_seen_ip": "2603:7000:b702:4de5:352d:a98e:3b8:3470"
     },
     "jose": {
       "id": "a939717ec9794a05abde206296effa45",
@@ -303,6 +303,22 @@
       "pass_hash": "$2b$12$R.QOOrkUMll1QHgOaw7O5eXFqKbD4PB7lUiU89m8KVSRWmNQgFM2S",
       "created_at": "2025-11-14T23:53:08.967815Z",
       "last_seen_ip": "75.51.50.103"
+    },
+    "clover": {
+      "id": "85971f9071934a5f8b1f118d6f1e06dd",
+      "username": "clover",
+      "display_name": "Clover",
+      "pass_hash": "$2b$12$rsX0Gz3tw5UYzmwk1ibPYuxoDzBL.bOfS4vvLwvNBlS8nAQnR/47q",
+      "created_at": "2025-11-15T18:49:00.683700Z",
+      "last_seen_ip": "108.173.166.109"
+    },
+    "exxyyyy": {
+      "id": "14507c421bd441efbb676ab19cb09a28",
+      "username": "ExxyYYY",
+      "display_name": "^^ exxy!!!! <3",
+      "pass_hash": "$2b$12$foR92YkZkPMHE9IPwaLO2OUenZTY45sYZG2mKd0irTZYrfWuD2pLm",
+      "created_at": "2025-11-15T19:24:52.202442Z",
+      "last_seen_ip": "52.124.96.225"
     }
   }
 }
