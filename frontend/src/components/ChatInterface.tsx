@@ -230,8 +230,8 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   const aiPendingRef = useRef<Record<string, string>>({});
   const aiUpdateTimer = useRef<number | null>(null);
   // Cache off-thread updates to apply on next history load for that thread
-  const pendingTextUpdatesRef = useRef<Record<string, { text: string; edited?: boolean }>>({});
-  const pendingReactionUpdatesRef = useRef<Record<string, { reactions: Record<string, string[]> }>>({});
+  const pendingTextUpdatesRef = useRef<Record<string, Record<string, { text: string; edited?: boolean }>>>({});
+  const pendingReactionUpdatesRef = useRef<Record<string, Record<string, { reactions: Record<string, string[]> }>>>({});
 
   // Track message DOM nodes and flashing state for mention alerts
   const messageRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -469,10 +469,10 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   
 
   useEffect(() => {
-    const sync = () => setSidebar(window.innerWidth >= 768);
+    const sync = () => setSidebar(window.innerWidth >= 1024);
     sync();
     const onResize = () => {
-      const shouldOpen = window.innerWidth >= 768;
+      const shouldOpen = window.innerWidth >= 1024;
       setSidebar(prev => (prev === shouldOpen ? prev : shouldOpen));
     };
     window.addEventListener("resize", onResize);
@@ -631,17 +631,37 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
 
           // Apply any pending off-thread updates that were cached for this thread
           try {
-            const applyIds = Object.keys(pendingTextUpdatesRef.current || {});
-            if (applyIds.length) {
+            const textUpdates = pendingTextUpdatesRef.current[tk];
+            if (textUpdates) {
               base = base.map(m => {
                 const sid = m && m.id != null ? String(m.id) : '';
                 if (!sid) return m;
-                const upd = (pendingTextUpdatesRef.current as any)[sid];
+                const upd = textUpdates[sid];
                 if (!upd) return m;
                 return { ...m, text: upd.text ?? m.text, edited: upd.edited ?? m.edited };
               });
-              // Clear only entries that have been applied
-              applyIds.forEach(id => { try { delete (pendingTextUpdatesRef.current as any)[id]; } catch {} });
+              delete pendingTextUpdatesRef.current[tk];
+            }
+
+            const reactionUpdates = pendingReactionUpdatesRef.current[tk];
+            if (reactionUpdates) {
+              base = base.map(m => {
+                const sid = m && m.id != null ? String(m.id) : '';
+                if (!sid) return m;
+                const upd = reactionUpdates[sid];
+                if (!upd) return m;
+                // Deep merge reactions
+                const mergedReactions = { ...(m.reactions || {}) };
+                for (const emoji in upd.reactions) {
+                  const newUsers = new Set(mergedReactions[emoji] || []);
+                  for (const user of upd.reactions[emoji]) {
+                    newUsers.add(user);
+                  }
+                  mergedReactions[emoji] = Array.from(newUsers).sort();
+                }
+                return { ...m, reactions: mergedReactions };
+              });
+              delete pendingReactionUpdatesRef.current[tk];
             }
           } catch {}
 
@@ -678,56 +698,7 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
             }
           }
 
-          // Third pass: collapse duplicate-looking entries by sender + normalized text
-          const bySig = new Map<string, any>();
-          const mergeReacts = (a?: any, b?: any) => {
-            try {
-              const r1 = (a && a.reactions) || {};
-              const r2 = (b && b.reactions) || {};
-              const keys = new Set([...Object.keys(r1), ...Object.keys(r2)]);
-              const rr: any = {};
-              keys.forEach(k => {
-                const s = new Set<string>(r1[k] || []);
-                (r2[k] || []).forEach((u: string) => s.add(u));
-                if (s.size) rr[k] = Array.from(s).sort();
-              });
-              return rr;
-            } catch { return (a && a.reactions) || (b && b.reactions) || {}; }
-          };
-          for (const it of base) {
-            const kind = it?.type;
-            const sender = it?.sender;
-            const txt = typeof it?.text === 'string' ? it.text : '';
-            if (kind !== 'message' || !sender || !txt) {
-              // keep non-text messages as-is
-              const key = `__nonmsg__${Math.random()}`;
-              bySig.set(key, it);
-              continue;
-            }
-            const sig = `${String(sender)}::${normText(txt)}::${it.timestamp || ''}`;
-            const prev = bySig.get(sig);
-            if (!prev) {
-              bySig.set(sig, it);
-            } else {
-              const aEdited = !!prev.edited;
-              const bEdited = !!it.edited;
-              const aTs = Date.parse(prev.timestamp || '') || 0;
-              const bTs = Date.parse(it.timestamp || '') || 0;
-              const close = Math.abs(aTs - bTs) < 2 * 60 * 1000; // 2 minutes window
-              if (aEdited && !bEdited && close) {
-                bySig.set(sig, { ...prev, reactions: mergeReacts(prev, it) });
-              } else if (!aEdited && bEdited && close) {
-                bySig.set(sig, { ...it, reactions: mergeReacts(prev, it) });
-              } else if (bTs && (!aTs || bTs >= aTs)) {
-                bySig.set(sig, { ...it, reactions: mergeReacts(prev, it) });
-              } else {
-                bySig.set(sig, { ...prev, reactions: mergeReacts(prev, it) });
-              }
-            }
-          }
-          const collapsed = Array.from(bySig.values());
-
-          return uniqueById(collapsed);
+          return uniqueById(base);
         } catch {
           return items || [];
         }
@@ -855,10 +826,14 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         const isGC = d.thread === 'gc' && typeof d.gcid === 'string';
         const isDM = d.thread === 'dm' && typeof d.peer === 'string';
         const isMain = !d.thread || d.thread === 'main';
+        const threadKey = isGC ? `gc:${d.gcid}` : isDM ? `dm:${d.peer}` : 'main';
         // Off-thread? cache to apply on next history load for that thread
         const offThread = (isGC && activeGcRef.current !== d.gcid) || (isDM && activeDmRef.current !== d.peer) || (isMain && (activeDmRef.current !== null || !!activeGcRef.current));
         if (offThread) {
-          try { pendingTextUpdatesRef.current[String(d.id)] = { text: d.text, edited: true }; } catch {}
+          try {
+            if (!pendingTextUpdatesRef.current[threadKey]) pendingTextUpdatesRef.current[threadKey] = {};
+            pendingTextUpdatesRef.current[threadKey][String(d.id)] = { text: d.text, edited: true };
+          } catch {}
           return;
         }
         setMessages(prev => uniqueById(prev.map(m => (String(m.id) === String(d.id) ? { ...m, text: d.text, edited: true } : m))));
@@ -870,10 +845,16 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
         const isGC = d.thread === 'gc' && typeof d.gcid === 'string';
         const isDM = d.thread === 'dm' && typeof d.peer === 'string';
         const isMain = !d.thread || d.thread === 'main';
+        const threadKey = isGC ? `gc:${d.gcid}` : isDM ? `dm:${d.peer}` : 'main';
         // Off-thread? cache to apply later on history load
         const offThread = (isGC && activeGcRef.current !== d.gcid) || (isDM && activeDmRef.current !== d.peer) || (isMain && (activeDmRef.current !== null || !!activeGcRef.current));
         if (offThread) {
-          try { if (d.reactions && typeof d.reactions === 'object') pendingReactionUpdatesRef.current[String(d.id)] = { reactions: d.reactions }; } catch {}
+          try {
+            if (d.reactions && typeof d.reactions === 'object') {
+              if (!pendingReactionUpdatesRef.current[threadKey]) pendingReactionUpdatesRef.current[threadKey] = {};
+              pendingReactionUpdatesRef.current[threadKey][String(d.id)] = { reactions: d.reactions };
+            }
+          } catch {}
           return;
         }
         setMessages(prev => uniqueById(prev.map(m => {
@@ -1940,9 +1921,9 @@ export function ChatInterface({ token, onLogout }: { token: string; onLogout: ()
   }, []);
 
   // totalUnreadDm removed (was used only by removed mobile button); unread counts still available individually
-  const [isMobile, setIsMobile] = useState<boolean>(typeof window !== 'undefined' ? window.innerWidth < 768 : false);
+  const [isMobile, setIsMobile] = useState<boolean>(typeof window !== 'undefined' ? window.innerWidth < 1024 : false);
   useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 768);
+    const onResize = () => setIsMobile(window.innerWidth < 1024);
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
